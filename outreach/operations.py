@@ -22,6 +22,8 @@ class OperationsStore:
     calls: list[dict] = field(default_factory=list)
     ehr_records: list[dict] = field(default_factory=list)
     audit_log: list[dict] = field(default_factory=list)
+    events: dict[str, dict] = field(default_factory=dict)
+    notifications: dict[str, dict] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.hospitals:
@@ -109,6 +111,13 @@ class OperationsStore:
             "created_at": now_iso(),
             "resolution": None,
         }
+        self.publish_event(
+            hospital_id=urgent_patient["hospital_id"],
+            event_type="escalation.created",
+            aggregate_id=escalation_id,
+            payload={"priority": "urgent", "patient_id": urgent_patient["id"]},
+            idempotency_key=f"seed-escalation:{escalation_id}",
+        )
 
     def tenant_rows(self, rows: list[dict], hospital_id: uuid.UUID | None) -> list[dict]:
         if hospital_id is None:
@@ -118,7 +127,7 @@ class OperationsStore:
     def record_audit(
         self,
         hospital_id: str,
-        actor_id: uuid.UUID,
+        actor_id: uuid.UUID | None,
         action: str,
         resource_type: str,
         resource_id: str,
@@ -128,7 +137,7 @@ class OperationsStore:
             {
                 "id": str(uuid.uuid4()),
                 "hospital_id": hospital_id,
-                "actor_id": str(actor_id),
+                "actor_id": str(actor_id) if actor_id else "system",
                 "action": action,
                 "resource_type": resource_type,
                 "resource_id": resource_id,
@@ -136,6 +145,43 @@ class OperationsStore:
                 "occurred_at": now_iso(),
             }
         )
+
+    def publish_event(
+        self,
+        *,
+        hospital_id: str,
+        event_type: str,
+        aggregate_id: str,
+        payload: dict,
+        idempotency_key: str,
+    ) -> tuple[dict, bool]:
+        existing = next(
+            (
+                event
+                for event in self.events.values()
+                if event["idempotency_key"] == idempotency_key
+            ),
+            None,
+        )
+        if existing:
+            return existing, False
+        event_id = str(uuid.uuid4())
+        event = {
+            "id": event_id,
+            "hospital_id": hospital_id,
+            "event_type": event_type,
+            "aggregate_id": aggregate_id,
+            "payload": payload,
+            "idempotency_key": idempotency_key,
+            "status": "pending",
+            "attempt_count": 0,
+            "available_at": now_iso(),
+            "created_at": now_iso(),
+            "processed_at": None,
+            "last_error": None,
+        }
+        self.events[event_id] = event
+        return event, True
 
 
 operations = OperationsStore()

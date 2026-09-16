@@ -117,8 +117,26 @@ async function auditView() {
   ])}</article>`;
 }
 
-const views = { overview, queue: queueView, campaigns: campaignsView, patients: patientsView, escalations: escalationsView, safety: safetyView, audit: auditView };
-const titles = { overview: "Operations overview", queue: "Outbound queue", campaigns: "Campaign management", patients: "Patient operations", escalations: "Clinical escalations", safety: "Safety evaluation", audit: "Audit trail" };
+async function systemView() {
+  const [metrics, events, notifications] = await Promise.all([api("/metrics/system"), api("/events"), api("/notifications")]);
+  return `<div class="grid metrics">
+    <article class="metric"><span>System state</span><strong>${escapeHtml(metrics.status)}</strong></article>
+    <article class="metric"><span>Pending events</span><strong>${metrics.pending_events}</strong></article>
+    <article class="metric"><span>Cutoff-risk tasks</span><strong>${metrics.cutoff_risk_tasks}</strong></article>
+    <article class="metric"><span>Notifications delivered</span><strong>${metrics.notifications_delivered}</strong></article>
+  </div>
+  <article class="panel"><div class="panel-head"><h2>Asynchronous workflows</h2><button class="button" id="process-events">Process events</button></div>${rows(events, [
+    { label: "Event", key: "event_type" }, { label: "Status", render: (x) => badge(x.status) },
+    { label: "Attempts", key: "attempt_count" }, { label: "Created", render: (x) => new Date(x.created_at).toLocaleString() }
+  ])}</article>
+  <article class="panel"><div class="panel-head"><h2>Notification delivery</h2></div>${rows(notifications, [
+    { label: "Subject", key: "subject" }, { label: "Channel", key: "channel" },
+    { label: "Recipient", key: "recipient_role" }, { label: "Status", render: (x) => badge(x.status) }
+  ])}</article>`;
+}
+
+const views = { overview, queue: queueView, campaigns: campaignsView, patients: patientsView, escalations: escalationsView, safety: safetyView, system: systemView, audit: auditView };
+const titles = { overview: "Operations overview", queue: "Outbound queue", campaigns: "Campaign management", patients: "Patient operations", escalations: "Clinical escalations", safety: "Safety evaluation", system: "System health", audit: "Audit trail" };
 
 async function render() {
   $("#alert").textContent = "";
@@ -127,6 +145,7 @@ async function render() {
   try {
     $("#content").innerHTML = await views[state.view]();
     $("#advance")?.addEventListener("click", async () => { await api("/simulation/step", { method: "POST" }); render(); });
+    $("#process-events")?.addEventListener("click", async () => { await api("/workflows/process", { method: "POST" }); render(); });
   } catch (error) {
     $("#alert").textContent = error.message;
     $("#content").innerHTML = "";

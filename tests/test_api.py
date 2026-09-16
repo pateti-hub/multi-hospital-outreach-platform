@@ -98,3 +98,20 @@ def test_discharge_import_is_validated_and_idempotent(monkeypatch) -> None:
     assert first.json()["imported"] == 1
     assert second.json()["duplicates"] == 1
     get_settings.cache_clear()
+
+
+def test_workflow_and_notifications_are_tenant_scoped(monkeypatch) -> None:
+    monkeypatch.setenv("DEMO_AUTH_ENABLED", "true")
+    get_settings.cache_clear()
+    client = TestClient(app)
+    riverside = auth_headers(client, "riverside-medical", "hospital_admin")
+    mercy = auth_headers(client, "mercy-general", "hospital_admin")
+    result = client.post("/api/v1/workflows/process", headers=riverside)
+    assert result.status_code == 200
+    notifications = client.get("/api/v1/notifications", headers=riverside).json()
+    assert notifications
+    assert all(
+        item["hospital_id"] == "22222222-2222-4222-8222-222222222222" for item in notifications
+    )
+    assert client.get("/api/v1/notifications", headers=mercy).json() == []
+    get_settings.cache_clear()
