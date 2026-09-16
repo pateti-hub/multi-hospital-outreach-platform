@@ -208,16 +208,26 @@ def tenant_queue(
 
 
 @app.get("/api/v1/simulation")
-def simulation_snapshot(principal: Principal = Depends(current_principal)) -> dict:
+async def simulation_snapshot(principal: Principal = Depends(current_principal)) -> dict:
+    if get_settings().persistence_enabled:
+        hospital_id = None if principal.role == Role.PLATFORM_ADMIN else principal.hospital_id
+        return await postgres_repository.queue_snapshot(hospital_id)
     return scoped_snapshot(principal)
 
 
 @app.post("/api/v1/simulation/step")
-def step_simulation(
+async def step_simulation(
     principal: Principal = Depends(
         require_roles(Role.PLATFORM_ADMIN, Role.HOSPITAL_ADMIN, Role.CAMPAIGN_MANAGER)
     ),
 ) -> dict:
+    if get_settings().persistence_enabled:
+        if principal.hospital_id is None:
+            raise HTTPException(
+                status_code=422,
+                detail="Select a hospital context to advance its queue",
+            )
+        return await postgres_repository.advance_queue(principal.hospital_id)
     return scoped_snapshot(principal, simulation.step())
 
 
@@ -314,12 +324,21 @@ async def storage_status(
 
 
 @app.post("/api/v1/campaigns", status_code=201)
-def create_campaign(
+async def create_campaign(
     request: CampaignCreateRequest,
     principal: Principal = Depends(require_roles(Role.HOSPITAL_ADMIN, Role.CAMPAIGN_MANAGER)),
 ) -> dict:
     if principal.hospital_id is None:
         raise HTTPException(status_code=422, detail="A hospital context is required")
+    if get_settings().persistence_enabled:
+        try:
+            return await postgres_repository.create_campaign(
+                hospital_id=principal.hospital_id,
+                actor_id=principal.user_id,
+                values=request.model_dump(),
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
     campaign_id = str(uuid.uuid4())
     campaign = {
         "id": campaign_id,
@@ -372,12 +391,18 @@ def campaign_workload_estimate(
 
 
 @app.post("/api/v1/discharges/import", status_code=202)
-def import_discharges(
+async def import_discharges(
     request: DischargeBatch,
     principal: Principal = Depends(require_roles(Role.HOSPITAL_ADMIN)),
 ) -> dict:
     if principal.hospital_id is None:
         raise HTTPException(status_code=422, detail="A hospital context is required")
+    if get_settings().persistence_enabled:
+        return await postgres_repository.import_discharges(
+            hospital_id=principal.hospital_id,
+            actor_id=principal.user_id,
+            records=request.records,
+        )
     hospital_id = str(principal.hospital_id)
     existing = {
         patient["external_id"]
@@ -443,11 +468,33 @@ def import_discharges(
 
 
 @app.patch("/api/v1/campaigns/{campaign_id}/status")
-def update_campaign_status(
+async def update_campaign_status(
     campaign_id: str,
     request: CampaignStatusRequest,
     principal: Principal = Depends(require_roles(Role.HOSPITAL_ADMIN, Role.CAMPAIGN_MANAGER)),
 ) -> dict:
+    if get_settings().persistence_enabled:
+        if principal.hospital_id is None:
+            raise HTTPException(status_code=422, detail="A hospital context is required")
+        campaigns = await postgres_repository.list_campaigns(principal.hospital_id)
+        campaign = next(
+            (item for item in campaigns if item["id"] == campaign_id),
+            None,
+        )
+        if campaign is None:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+        current = CampaignStatus(campaign["status"])
+        if request.status not in ALLOWED_TRANSITIONS.get(current, set()):
+            raise HTTPException(status_code=409, detail="Campaign transition is not allowed")
+        result = await postgres_repository.update_campaign_status(
+            campaign_id=uuid.UUID(campaign_id),
+            hospital_id=principal.hospital_id,
+            actor_id=principal.user_id,
+            status=request.status,
+        )
+        if result is None:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+        return result
     campaign = operations.campaigns.get(campaign_id)
     if campaign is None:
         raise HTTPException(status_code=404, detail="Campaign not found")
@@ -519,15 +566,29 @@ def update_escalation(
 
 
 @app.post("/api/v1/triage")
-def run_triage(
+async def run_triage(
     request: TriageRequest,
     principal: Principal = Depends(require_roles(Role.HOSPITAL_ADMIN, Role.CLINICAL_REVIEWER)),
 ) -> dict:
     patient = operations.patients.get(request.patient_id)
+    if get_settings().persistence_enabled:
+        patients = await postgres_repository.list_patients(principal.hospital_id)
+        patient = next(
+            (item for item in patients if item["id"] == request.patient_id),
+            None,
+        )
     if patient is None:
         raise HTTPException(status_code=404, detail="Patient not found")
     enforce_tenant(principal, uuid.UUID(patient["hospital_id"]))
     result = assess(request)
+    if get_settings().persistence_enabled:
+        ehr_record = await postgres_repository.create_triage_ehr_record(
+            hospital_id=uuid.UUID(patient["hospital_id"]),
+            patient_id=uuid.UUID(patient["id"]),
+            actor_id=principal.user_id,
+            payload=result.model_dump(mode="json"),
+        )
+        return {"triage": result, "mock_ehr_record": ehr_record}
     ehr_record = {
         "id": str(uuid.uuid4()),
         "hospital_id": patient["hospital_id"],
@@ -561,12 +622,22 @@ def run_triage(
 
 
 @app.get("/api/v1/mock-ehr/records")
-def list_ehr_records(principal: Principal = Depends(current_principal)) -> list[dict]:
+async def list_ehr_records(
+    principal: Principal = Depends(current_principal),
+) -> list[dict]:
+    if get_settings().persistence_enabled:
+        hospital_id = None if principal.role == Role.PLATFORM_ADMIN else principal.hospital_id
+        return await postgres_repository.list_ehr_records(hospital_id)
     return operations.tenant_rows(operations.ehr_records, principal.hospital_id)
 
 
 @app.get("/api/v1/audit")
-def list_audit_log(principal: Principal = Depends(current_principal)) -> list[dict]:
+async def list_audit_log(
+    principal: Principal = Depends(current_principal),
+) -> list[dict]:
+    if get_settings().persistence_enabled:
+        hospital_id = None if principal.role == Role.PLATFORM_ADMIN else principal.hospital_id
+        return await postgres_repository.list_audit(hospital_id)
     return operations.tenant_rows(operations.audit_log, principal.hospital_id)
 
 

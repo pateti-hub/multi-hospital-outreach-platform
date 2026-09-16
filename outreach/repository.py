@@ -1,22 +1,28 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
 
 from outreach.database import session_factory
-from outreach.enums import OutreachState
+from outreach.enums import CampaignStatus, OutreachState
+from outreach.ingestion import DischargeImport, evaluate_eligibility
 from outreach.models import (
+    AuditLog,
     Campaign,
     Discharge,
+    EHRRecord,
     Encounter,
+    Event,
     Hospital,
     OutreachTask,
     Patient,
     Protocol,
 )
 from outreach.operations import operations
+from outreach.queue import retry_delay_minutes
+from outreach.scheduler import durable_scheduler
 from outreach.simulation import QueueSimulation
 
 
@@ -255,6 +261,407 @@ class PostgresRepository:
                     }
                 )
             return result
+
+    async def create_campaign(
+        self,
+        *,
+        hospital_id: uuid.UUID,
+        actor_id: uuid.UUID,
+        values: dict,
+    ) -> dict:
+        async with session_factory()() as session, session.begin():
+            protocol_id = await session.scalar(
+                select(Protocol.id)
+                .where(Protocol.hospital_id == hospital_id, Protocol.active.is_(True))
+                .limit(1)
+            )
+            if protocol_id is None:
+                raise ValueError("Hospital has no active outreach protocol")
+            campaign = Campaign(
+                hospital_id=hospital_id,
+                name=values["name"],
+                status=CampaignStatus.DRAFT.value,
+                protocol_id=protocol_id,
+                eligibility_rules={"consent_required": True},
+                calling_window={"start": "09:00", "end": "18:00"},
+                priority_weight=max(1, round(values["priority_weight"])),
+                retry_limit=values["retry_limit"],
+            )
+            session.add(campaign)
+            await session.flush()
+            session.add(
+                AuditLog(
+                    hospital_id=hospital_id,
+                    actor_id=actor_id,
+                    action="campaign.created",
+                    resource_type="campaign",
+                    resource_id=campaign.id,
+                    occurred_at=datetime.now(UTC),
+                    details={"clinical_window_hours": values["clinical_window_hours"]},
+                )
+            )
+            return {
+                "id": str(campaign.id),
+                "hospital_id": str(hospital_id),
+                **values,
+                "status": campaign.status,
+                "eligible_patients": 0,
+                "completed": 0,
+            }
+
+    async def update_campaign_status(
+        self,
+        *,
+        campaign_id: uuid.UUID,
+        hospital_id: uuid.UUID,
+        actor_id: uuid.UUID,
+        status: CampaignStatus,
+    ) -> dict | None:
+        async with session_factory()() as session, session.begin():
+            campaign = await session.scalar(
+                select(Campaign)
+                .where(
+                    Campaign.id == campaign_id,
+                    Campaign.hospital_id == hospital_id,
+                )
+                .with_for_update()
+            )
+            if campaign is None:
+                return None
+            previous = campaign.status
+            campaign.status = status.value
+            session.add(
+                AuditLog(
+                    hospital_id=hospital_id,
+                    actor_id=actor_id,
+                    action="campaign.status_changed",
+                    resource_type="campaign",
+                    resource_id=campaign.id,
+                    occurred_at=datetime.now(UTC),
+                    details={"from": previous, "to": status.value},
+                )
+            )
+            return {
+                "id": str(campaign.id),
+                "hospital_id": str(hospital_id),
+                "name": campaign.name,
+                "status": campaign.status,
+            }
+
+    async def import_discharges(
+        self,
+        *,
+        hospital_id: uuid.UUID,
+        actor_id: uuid.UUID,
+        records: list[DischargeImport],
+    ) -> dict:
+        batch_id = uuid.uuid4()
+        imported = duplicates = ineligible = 0
+        results = []
+        async with session_factory()() as session, session.begin():
+            for record in records:
+                exists = await session.scalar(
+                    select(Patient.id).where(
+                        Patient.hospital_id == hospital_id,
+                        Patient.external_id == record.external_patient_id,
+                    )
+                )
+                if exists:
+                    duplicates += 1
+                    continue
+                eligible, reasons = evaluate_eligibility(record)
+                patient = Patient(
+                    hospital_id=hospital_id,
+                    external_id=record.external_patient_id,
+                    name={
+                        "given": record.name.given,
+                        "family": record.name.family,
+                        "text": f"{record.name.given} {record.name.family}",
+                    },
+                    telecom={"phone": record.phone},
+                    communication_preferences={
+                        "channel": "voice",
+                        "language": record.preferred_language,
+                    },
+                )
+                session.add(patient)
+                await session.flush()
+                encounter = Encounter(
+                    hospital_id=hospital_id,
+                    patient_id=patient.id,
+                    external_id=record.encounter_id,
+                    care_setting=record.care_setting,
+                    period_start=record.discharged_at,
+                    period_end=record.discharged_at,
+                    clinical_context={"condition_codes": record.condition_codes},
+                )
+                session.add(encounter)
+                await session.flush()
+                session.add(
+                    Discharge(
+                        hospital_id=hospital_id,
+                        patient_id=patient.id,
+                        encounter_id=encounter.id,
+                        discharged_at=record.discharged_at,
+                        follow_up_deadline=record.follow_up_deadline,
+                        conditions=record.condition_codes,
+                        medications=record.medication_summary,
+                        care_plan={
+                            "instructions": record.discharge_instructions,
+                            "eligible": eligible,
+                            "ineligibility_reasons": reasons,
+                        },
+                        risk_indicators=[record.risk.value],
+                    )
+                )
+                imported += 1
+                ineligible += int(not eligible)
+                results.append(
+                    {
+                        "patient_id": str(patient.id),
+                        "external_patient_id": record.external_patient_id,
+                        "eligible": eligible,
+                        "reasons": reasons,
+                    }
+                )
+            session.add(
+                AuditLog(
+                    hospital_id=hospital_id,
+                    actor_id=actor_id,
+                    action="discharge.batch_imported",
+                    resource_type="import_batch",
+                    resource_id=batch_id,
+                    occurred_at=datetime.now(UTC),
+                    details={
+                        "imported": imported,
+                        "duplicates": duplicates,
+                        "ineligible": ineligible,
+                    },
+                )
+            )
+        return {
+            "batch_id": str(batch_id),
+            "received": len(records),
+            "imported": imported,
+            "duplicates": duplicates,
+            "ineligible": ineligible,
+            "eligibility_results": results,
+        }
+
+    async def queue_snapshot(self, hospital_id: uuid.UUID | None) -> dict:
+        async with session_factory()() as session:
+            statement = (
+                select(OutreachTask, Patient, Discharge, Hospital)
+                .join(Patient, Patient.id == OutreachTask.patient_id)
+                .join(Discharge, Discharge.id == OutreachTask.discharge_id)
+                .join(Hospital, Hospital.id == OutreachTask.hospital_id)
+            )
+            if hospital_id:
+                statement = statement.where(OutreachTask.hospital_id == hospital_id)
+            rows = (
+                await session.execute(
+                    statement.order_by(
+                        OutreachTask.priority_score.desc(),
+                        OutreachTask.deadline.asc(),
+                    )
+                )
+            ).all()
+            tasks = [
+                {
+                    "id": str(task.id),
+                    "patient_ref": patient.external_id,
+                    "hospital": hospital.slug,
+                    "risk": discharge.risk_indicators[0],
+                    "discharged_at": discharge.discharged_at.isoformat(),
+                    "deadline": task.deadline.isoformat(),
+                    "state": task.state,
+                    "attempts": task.attempt_count,
+                    "callback_at": (task.callback_at.isoformat() if task.callback_at else None),
+                    "priority": task.priority_score,
+                    "last_outcome": None,
+                }
+                for task, patient, discharge, hospital in rows
+            ]
+            counts: dict[str, int] = {}
+            for task in tasks:
+                counts[task["state"]] = counts.get(task["state"], 0) + 1
+            capacity = 0
+            if hospital_id:
+                capacity = int(
+                    await session.scalar(
+                        select(Hospital.outbound_capacity).where(Hospital.id == hospital_id)
+                    )
+                    or 0
+                )
+            else:
+                capacity = int(
+                    await session.scalar(select(func.sum(Hospital.outbound_capacity))) or 0
+                )
+            return {
+                "simulated_time": datetime.now(UTC).isoformat(),
+                "capacity": capacity,
+                "active_calls": counts.get(OutreachState.CALLING.value, 0),
+                "peak_concurrency": capacity,
+                "state_counts": counts,
+                "tasks": tasks,
+            }
+
+    async def advance_queue(self, hospital_id: uuid.UUID) -> dict:
+        async with session_factory()() as session:
+            await durable_scheduler.recover_stale(session, hospital_id)
+        await self._complete_active(hospital_id)
+        async with session_factory()() as session:
+            capacity = int(
+                await session.scalar(
+                    select(Hospital.outbound_capacity).where(Hospital.id == hospital_id)
+                )
+                or 0
+            )
+        async with session_factory()() as session:
+            await durable_scheduler.reserve(
+                session,
+                hospital_id=hospital_id,
+                worker_id="prototype-simulator",
+                capacity=capacity,
+                lease_seconds=90,
+            )
+        return await self.queue_snapshot(hospital_id)
+
+    async def _complete_active(self, hospital_id: uuid.UUID) -> None:
+        now = datetime.now(UTC)
+        async with session_factory()() as session, session.begin():
+            tasks = list(
+                (
+                    await session.scalars(
+                        select(OutreachTask)
+                        .where(
+                            OutreachTask.hospital_id == hospital_id,
+                            OutreachTask.state == OutreachState.CALLING.value,
+                        )
+                        .with_for_update(skip_locked=True)
+                    )
+                ).all()
+            )
+            outcomes = ["completed", "no_answer", "busy", "voicemail", "dropped"]
+            for task in tasks:
+                outcome = outcomes[(task.id.int + task.attempt_count) % len(outcomes)]
+                delay = retry_delay_minutes(outcome, task.attempt_count)
+                if outcome == "completed":
+                    task.state = OutreachState.COMPLETED.value
+                elif delay is None:
+                    task.state = OutreachState.MANUAL_FOLLOW_UP.value
+                else:
+                    task.state = OutreachState.RETRY_SCHEDULED.value
+                    task.available_at = now + timedelta(minutes=delay)
+                    task.callback_at = task.available_at
+                task.lease_owner = None
+                task.lease_expires_at = None
+                event = Event(
+                    hospital_id=hospital_id,
+                    event_type=f"call.{outcome}",
+                    aggregate_id=task.id,
+                    payload={"attempt": task.attempt_count, "outcome": outcome},
+                    idempotency_key=f"outcome:{task.id}:{task.attempt_count}",
+                    occurred_at=now,
+                    processed_at=now,
+                )
+                session.add(event)
+
+    async def create_triage_ehr_record(
+        self,
+        *,
+        hospital_id: uuid.UUID,
+        patient_id: uuid.UUID,
+        actor_id: uuid.UUID,
+        payload: dict,
+    ) -> dict:
+        now = datetime.now(UTC)
+        async with session_factory()() as session, session.begin():
+            record = EHRRecord(
+                hospital_id=hospital_id,
+                patient_id=patient_id,
+                resource_type="Observation",
+                status="preliminary",
+                source="structured-outreach-triage",
+                payload=payload,
+                created_at=now,
+                synced_at=None,
+            )
+            session.add(record)
+            await session.flush()
+            session.add(
+                AuditLog(
+                    hospital_id=hospital_id,
+                    actor_id=actor_id,
+                    action="triage.completed",
+                    resource_type="patient",
+                    resource_id=patient_id,
+                    occurred_at=now,
+                    details={
+                        "classification": payload["final_classification"],
+                        "escalation_required": payload["escalation_required"],
+                    },
+                )
+            )
+            return {
+                "id": str(record.id),
+                "hospital_id": str(hospital_id),
+                "patient_id": str(patient_id),
+                "resource_type": record.resource_type,
+                "status": record.status,
+                "source": record.source,
+                "payload": payload,
+                "created_at": now.isoformat(),
+            }
+
+    async def list_ehr_records(self, hospital_id: uuid.UUID | None) -> list[dict]:
+        async with session_factory()() as session:
+            statement = select(EHRRecord)
+            if hospital_id:
+                statement = statement.where(EHRRecord.hospital_id == hospital_id)
+            rows = list(
+                (await session.scalars(statement.order_by(EHRRecord.created_at.desc()))).all()
+            )
+            return [
+                {
+                    "id": str(row.id),
+                    "hospital_id": str(row.hospital_id),
+                    "patient_id": str(row.patient_id),
+                    "resource_type": row.resource_type,
+                    "status": row.status,
+                    "source": row.source,
+                    "payload": row.payload,
+                    "created_at": row.created_at.isoformat(),
+                    "synced_at": row.synced_at.isoformat() if row.synced_at else None,
+                }
+                for row in rows
+            ]
+
+    async def list_audit(self, hospital_id: uuid.UUID | None) -> list[dict]:
+        async with session_factory()() as session:
+            statement = select(AuditLog)
+            if hospital_id:
+                statement = statement.where(AuditLog.hospital_id == hospital_id)
+            rows = list(
+                (
+                    await session.scalars(
+                        statement.order_by(AuditLog.occurred_at.desc()).limit(500)
+                    )
+                ).all()
+            )
+            return [
+                {
+                    "id": str(row.id),
+                    "hospital_id": str(row.hospital_id),
+                    "actor_id": str(row.actor_id) if row.actor_id else "system",
+                    "action": row.action,
+                    "resource_type": row.resource_type,
+                    "resource_id": str(row.resource_id),
+                    "occurred_at": row.occurred_at.isoformat(),
+                    "details": row.details,
+                }
+                for row in rows
+            ]
 
 
 postgres_repository = PostgresRepository()
