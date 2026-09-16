@@ -16,6 +16,7 @@ from outreach.database import close_database, initialize_database
 from outreach.enums import CampaignStatus, EscalationStatus, Role
 from outreach.ingestion import DischargeBatch, evaluate_eligibility
 from outreach.operations import operations
+from outreach.repository import postgres_repository
 from outreach.safety import run_safety_evaluation
 from outreach.security import (
     Principal,
@@ -33,6 +34,7 @@ from outreach.workflows import workflow_processor
 async def lifespan(_: FastAPI):
     if get_settings().persistence_enabled:
         await initialize_database()
+        await postgres_repository.seed_synthetic_foundation(simulation)
     yield
     if get_settings().persistence_enabled:
         await close_database()
@@ -149,17 +151,21 @@ def scoped_snapshot(principal: Principal, snapshot: dict | None = None) -> dict:
 
 
 @app.get("/api/v1/health")
-def health() -> dict:
+async def health() -> dict:
     failed_events = sum(event["status"] == "failed" for event in operations.events.values())
-    return {
+    result = {
         "status": "degraded" if failed_events else "healthy",
         "time": datetime.now(UTC).isoformat(),
         "components": {
             "api": "healthy",
             "queue_simulator": "healthy",
             "workflow_processor": "degraded" if failed_events else "healthy",
+            "database": ("healthy" if get_settings().persistence_enabled else "disabled"),
         },
     }
+    if get_settings().persistence_enabled:
+        result["database_counts"] = await postgres_repository.counts()
+    return result
 
 
 @app.post("/api/v1/auth/demo-token")
@@ -246,7 +252,12 @@ def queue_metrics(
 
 
 @app.get("/api/v1/hospitals")
-def list_hospitals(principal: Principal = Depends(current_principal)) -> list[dict]:
+async def list_hospitals(
+    principal: Principal = Depends(current_principal),
+) -> list[dict]:
+    if get_settings().persistence_enabled:
+        hospital_id = None if principal.role == Role.PLATFORM_ADMIN else principal.hospital_id
+        return await postgres_repository.list_hospitals(hospital_id)
     rows = list(operations.hospitals.values())
     if principal.role == Role.PLATFORM_ADMIN:
         return rows
@@ -254,7 +265,12 @@ def list_hospitals(principal: Principal = Depends(current_principal)) -> list[di
 
 
 @app.get("/api/v1/patients")
-def list_patients(principal: Principal = Depends(current_principal)) -> list[dict]:
+async def list_patients(
+    principal: Principal = Depends(current_principal),
+) -> list[dict]:
+    if get_settings().persistence_enabled:
+        hospital_id = None if principal.role == Role.PLATFORM_ADMIN else principal.hospital_id
+        return await postgres_repository.list_patients(hospital_id)
     return operations.tenant_rows(list(operations.patients.values()), principal.hospital_id)
 
 
@@ -275,8 +291,26 @@ def patient_detail(patient_id: str, principal: Principal = Depends(current_princ
 
 
 @app.get("/api/v1/campaigns")
-def list_campaigns(principal: Principal = Depends(current_principal)) -> list[dict]:
+async def list_campaigns(
+    principal: Principal = Depends(current_principal),
+) -> list[dict]:
+    if get_settings().persistence_enabled:
+        hospital_id = None if principal.role == Role.PLATFORM_ADMIN else principal.hospital_id
+        return await postgres_repository.list_campaigns(hospital_id)
     return operations.tenant_rows(list(operations.campaigns.values()), principal.hospital_id)
+
+
+@app.get("/api/v1/storage/status")
+async def storage_status(
+    _: Principal = Depends(require_roles(Role.PLATFORM_ADMIN, Role.HOSPITAL_ADMIN)),
+) -> dict:
+    if not get_settings().persistence_enabled:
+        return {"mode": "in_memory", "database": "disabled"}
+    return {
+        "mode": "postgresql",
+        "database": "healthy",
+        "counts": await postgres_repository.counts(),
+    }
 
 
 @app.post("/api/v1/campaigns", status_code=201)

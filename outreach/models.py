@@ -170,6 +170,31 @@ class Event(Base, IdMixin, TenantMixin):
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class EHRRecord(Base, IdMixin, TenantMixin):
+    __tablename__ = "ehr_records"
+
+    patient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("patients.id"), index=True)
+    resource_type: Mapped[str] = mapped_column(String(80), index=True)
+    status: Mapped[str] = mapped_column(String(40), index=True)
+    source: Mapped[str] = mapped_column(String(120))
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class Notification(Base, IdMixin, TenantMixin):
+    __tablename__ = "notifications"
+
+    event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("events.id"), index=True)
+    channel: Mapped[str] = mapped_column(String(40))
+    recipient_role: Mapped[str] = mapped_column(String(40), index=True)
+    subject: Mapped[str] = mapped_column(String(240))
+    status: Mapped[str] = mapped_column(String(40), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(160), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class AuditLog(Base, IdMixin, TenantMixin):
     __tablename__ = "audit_logs"
 
