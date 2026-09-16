@@ -1,7 +1,7 @@
 import secrets
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,6 +18,19 @@ class Settings(BaseSettings):
     default_timezone: str = "Asia/Kolkata"
     queue_lease_seconds: int = 90
     persistence_enabled: bool = False
+
+    @field_validator("database_url")
+    @classmethod
+    def normalize_async_database_url(cls, value: str) -> str:
+        """Accept standard Supabase/Postgres URLs with SQLAlchemy asyncpg."""
+        if value.startswith("postgres://"):
+            value = "postgresql://" + value.removeprefix("postgres://")
+        if value.startswith("postgresql://"):
+            value = "postgresql+asyncpg://" + value.removeprefix("postgresql://")
+        # Supabase connection strings commonly use libpq's sslmode spelling;
+        # asyncpg expects ssl.
+        value = value.replace("sslmode=require", "ssl=require")
+        return value
 
 
 @lru_cache
