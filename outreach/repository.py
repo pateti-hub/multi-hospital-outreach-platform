@@ -48,6 +48,7 @@ class PostgresRepository:
                         },
                     )
                 )
+                await session.flush()
                 protocol = Protocol(
                     id=_uuid("protocol", hospital_row["slug"]),
                     hospital_id=hospital_id,
@@ -66,6 +67,7 @@ class PostgresRepository:
                 )
                 protocols[hospital_row["id"]] = protocol
                 session.add(protocol)
+                await session.flush()
 
                 campaign_row = next(
                     item
@@ -85,6 +87,7 @@ class PostgresRepository:
                 )
                 campaigns[hospital_row["id"]] = campaign
                 session.add(campaign)
+                await session.flush()
 
             for patient_row in operations.patients.values():
                 hospital_id = uuid.UUID(patient_row["hospital_id"])
@@ -119,7 +122,12 @@ class PostgresRepository:
                     care_plan={"synthetic": True},
                     risk_indicators=[patient_row["risk"]],
                 )
-                session.add_all([patient, encounter, discharge])
+                session.add(patient)
+                await session.flush()
+                session.add(encounter)
+                await session.flush()
+                session.add(discharge)
+                await session.flush()
 
             for task in simulation.tasks:
                 hospital = next(
