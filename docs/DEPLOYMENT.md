@@ -24,6 +24,11 @@ The health check is `/api/v1/health`. The container listens on port `8000`; Rail
 its generated domain to the process. PostgreSQL tables are initialized for the prototype.
 Managed migrations are required before production use.
 
+Standard Supabase `postgresql://` and legacy `postgres://` connection strings are normalized
+to SQLAlchemy's asyncpg driver. `sslmode=require` is also normalized to asyncpg's `ssl`
+parameter. Only `DATABASE_URL` is required for PostgreSQL persistence; the anonymous
+Supabase browser key is not used by this backend.
+
 ## Local Docker
 
 ```bash
