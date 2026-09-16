@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -10,7 +11,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from outreach.config import get_settings
+from outreach.database import close_database, initialize_database
 from outreach.enums import CampaignStatus, EscalationStatus, Role
+from outreach.ingestion import DischargeBatch, evaluate_eligibility
 from outreach.operations import operations
 from outreach.safety import run_safety_evaluation
 from outreach.security import (
@@ -23,10 +26,21 @@ from outreach.security import (
 from outreach.simulation import QueueSimulation
 from outreach.triage import TriageRequest, assess
 
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    if get_settings().persistence_enabled:
+        await initialize_database()
+    yield
+    if get_settings().persistence_enabled:
+        await close_database()
+
+
 app = FastAPI(
     title="Multi-Hospital Post-Discharge Outreach Platform",
     version="0.1.0",
     description="Synthetic-data prototype. Not for clinical use.",
+    lifespan=lifespan,
 )
 
 
@@ -55,6 +69,14 @@ class EscalationUpdateRequest(BaseModel):
     status: EscalationStatus
     assigned_to: str | None = Field(default=None, max_length=180)
     resolution: str | None = Field(default=None, max_length=2_000)
+
+
+class CampaignCreateRequest(BaseModel):
+    name: str = Field(min_length=3, max_length=180)
+    description: str = Field(min_length=3, max_length=1_000)
+    clinical_window_hours: int = Field(ge=1, le=168)
+    retry_limit: int = Field(default=3, ge=0, le=10)
+    priority_weight: float = Field(default=1.0, ge=0.1, le=5)
 
 
 DEMO_HOSPITALS = {
@@ -217,13 +239,109 @@ def list_campaigns(principal: Principal = Depends(current_principal)) -> list[di
     return operations.tenant_rows(list(operations.campaigns.values()), principal.hospital_id)
 
 
+@app.post("/api/v1/campaigns", status_code=201)
+def create_campaign(
+    request: CampaignCreateRequest,
+    principal: Principal = Depends(require_roles(Role.HOSPITAL_ADMIN, Role.CAMPAIGN_MANAGER)),
+) -> dict:
+    if principal.hospital_id is None:
+        raise HTTPException(status_code=422, detail="A hospital context is required")
+    campaign_id = str(uuid.uuid4())
+    campaign = {
+        "id": campaign_id,
+        "hospital_id": str(principal.hospital_id),
+        **request.model_dump(),
+        "status": CampaignStatus.DRAFT.value,
+        "eligible_patients": 0,
+        "completed": 0,
+    }
+    operations.campaigns[campaign_id] = campaign
+    operations.record_audit(
+        campaign["hospital_id"],
+        principal.user_id,
+        "campaign.created",
+        "campaign",
+        campaign_id,
+    )
+    return campaign
+
+
+@app.post("/api/v1/discharges/import", status_code=202)
+def import_discharges(
+    request: DischargeBatch,
+    principal: Principal = Depends(require_roles(Role.HOSPITAL_ADMIN)),
+) -> dict:
+    if principal.hospital_id is None:
+        raise HTTPException(status_code=422, detail="A hospital context is required")
+    hospital_id = str(principal.hospital_id)
+    existing = {
+        patient["external_id"]
+        for patient in operations.patients.values()
+        if patient["hospital_id"] == hospital_id
+    }
+    imported = duplicates = ineligible = 0
+    eligibility_results = []
+    for record in request.records:
+        if record.external_patient_id in existing:
+            duplicates += 1
+            continue
+        eligible, reasons = evaluate_eligibility(record)
+        patient_id = str(uuid.uuid4())
+        operations.patients[patient_id] = {
+            "id": patient_id,
+            "hospital_id": hospital_id,
+            "external_id": record.external_patient_id,
+            "display_name": f"{record.name.given} {record.name.family}",
+            "phone": record.phone,
+            "care_setting": record.care_setting,
+            "condition": ", ".join(record.condition_codes),
+            "risk": record.risk.value,
+            "discharged_at": record.discharged_at.isoformat(),
+            "follow_up_deadline": record.follow_up_deadline.isoformat(),
+            "communication_preference": record.preferred_language,
+            "outreach_status": "pending" if eligible else "ineligible",
+            "healthcare_context": {
+                "encounter_id": record.encounter_id,
+                "condition_codes": record.condition_codes,
+                "discharge_instructions": record.discharge_instructions,
+                "medication_summary": record.medication_summary,
+            },
+        }
+        imported += 1
+        ineligible += int(not eligible)
+        eligibility_results.append(
+            {
+                "patient_id": patient_id,
+                "external_patient_id": record.external_patient_id,
+                "eligible": eligible,
+                "reasons": reasons,
+            }
+        )
+        existing.add(record.external_patient_id)
+    batch_id = str(uuid.uuid4())
+    operations.record_audit(
+        hospital_id,
+        principal.user_id,
+        "discharge.batch_imported",
+        "import_batch",
+        batch_id,
+        {"imported": imported, "duplicates": duplicates, "ineligible": ineligible},
+    )
+    return {
+        "batch_id": batch_id,
+        "received": len(request.records),
+        "imported": imported,
+        "duplicates": duplicates,
+        "ineligible": ineligible,
+        "eligibility_results": eligibility_results,
+    }
+
+
 @app.patch("/api/v1/campaigns/{campaign_id}/status")
 def update_campaign_status(
     campaign_id: str,
     request: CampaignStatusRequest,
-    principal: Principal = Depends(
-        require_roles(Role.HOSPITAL_ADMIN, Role.CAMPAIGN_MANAGER)
-    ),
+    principal: Principal = Depends(require_roles(Role.HOSPITAL_ADMIN, Role.CAMPAIGN_MANAGER)),
 ) -> dict:
     campaign = operations.campaigns.get(campaign_id)
     if campaign is None:
@@ -246,18 +364,14 @@ def update_campaign_status(
 
 @app.get("/api/v1/escalations")
 def list_escalations(principal: Principal = Depends(current_principal)) -> list[dict]:
-    return operations.tenant_rows(
-        list(operations.escalations.values()), principal.hospital_id
-    )
+    return operations.tenant_rows(list(operations.escalations.values()), principal.hospital_id)
 
 
 @app.patch("/api/v1/escalations/{escalation_id}")
 def update_escalation(
     escalation_id: str,
     request: EscalationUpdateRequest,
-    principal: Principal = Depends(
-        require_roles(Role.HOSPITAL_ADMIN, Role.CLINICAL_REVIEWER)
-    ),
+    principal: Principal = Depends(require_roles(Role.HOSPITAL_ADMIN, Role.CLINICAL_REVIEWER)),
 ) -> dict:
     escalation = operations.escalations.get(escalation_id)
     if escalation is None:
@@ -284,9 +398,7 @@ def update_escalation(
 @app.post("/api/v1/triage")
 def run_triage(
     request: TriageRequest,
-    principal: Principal = Depends(
-        require_roles(Role.HOSPITAL_ADMIN, Role.CLINICAL_REVIEWER)
-    ),
+    principal: Principal = Depends(require_roles(Role.HOSPITAL_ADMIN, Role.CLINICAL_REVIEWER)),
 ) -> dict:
     patient = operations.patients.get(request.patient_id)
     if patient is None:

@@ -89,9 +89,7 @@ class QueueSimulation:
             }
             and (task.callback_at is None or task.callback_at <= self.now)
         ]
-        for task in sorted(eligible, key=lambda item: item.priority, reverse=True)[
-            : self.capacity
-        ]:
+        for task in sorted(eligible, key=lambda item: item.priority, reverse=True)[: self.capacity]:
             task.state = OutreachState.CALLING
             task.attempts += 1
             task.callback_at = None

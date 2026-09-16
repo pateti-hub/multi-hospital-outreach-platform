@@ -15,9 +15,7 @@ def test_protocol_red_flag_forces_urgent_escalation() -> None:
 
 
 def test_uncertainty_is_escalated_conservatively() -> None:
-    result = assess(
-        TriageRequest(patient_id="synthetic", transcript="I am not sure how I feel.")
-    )
+    result = assess(TriageRequest(patient_id="synthetic", transcript="I am not sure how I feel."))
     assert result.final_classification == "uncertain"
     assert result.escalation_required is True
 

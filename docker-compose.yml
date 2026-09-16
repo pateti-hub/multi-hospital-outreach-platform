@@ -22,6 +22,7 @@ services:
       APP_SECRET: ${APP_SECRET:-local-development-secret-change-before-deploying}
       ENVIRONMENT: development
       DEMO_AUTH_ENABLED: "true"
+      PERSISTENCE_ENABLED: "true"
     ports:
       - "8000:8000"
     depends_on:
