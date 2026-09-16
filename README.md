@@ -20,6 +20,9 @@ and mock EHR updates.
 - prompt-injection-resistant protocol red flags and human escalation
 - controlled mock EHR observation writes and auditable workflow actions
 - repeatable safety evaluation with confusion matrix and false-negative rate
+- reviewer assignment, review, resolution, and patient operational timelines
+- campaign workload estimates and a reproducible 240-patient synthetic feed generator
+- Railway deployment configuration and health checks
 - architecture, queue, and security documentation
 - repeatable unit tests
 
@@ -51,3 +54,6 @@ Demo authentication is deliberately evaluation-only. Set
 - [Architecture](docs/ARCHITECTURE.md)
 - [Queue design](docs/QUEUE_DESIGN.md)
 - [Security and limitations](docs/SECURITY_AND_LIMITATIONS.md)
+- [Data model](docs/DATA_MODEL.md)
+- [Deployment](docs/DEPLOYMENT.md)
+- [Evaluator demo](docs/DEMO_GUIDE.md)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from math import ceil
 from pathlib import Path
 from typing import Literal
 
@@ -107,6 +108,23 @@ ALLOWED_TRANSITIONS = {
         CampaignStatus.CANCELLED,
         CampaignStatus.FAILED,
     },
+}
+ESCALATION_TRANSITIONS = {
+    EscalationStatus.OPEN: {EscalationStatus.ASSIGNED},
+    EscalationStatus.ASSIGNED: {
+        EscalationStatus.IN_REVIEW,
+        EscalationStatus.OPEN,
+    },
+    EscalationStatus.IN_REVIEW: {
+        EscalationStatus.WAITING_FOR_INFORMATION,
+        EscalationStatus.RESOLVED,
+        EscalationStatus.ASSIGNED,
+    },
+    EscalationStatus.WAITING_FOR_INFORMATION: {
+        EscalationStatus.IN_REVIEW,
+        EscalationStatus.RESOLVED,
+    },
+    EscalationStatus.RESOLVED: {EscalationStatus.CLOSED},
 }
 
 
@@ -240,6 +258,22 @@ def list_patients(principal: Principal = Depends(current_principal)) -> list[dic
     return operations.tenant_rows(list(operations.patients.values()), principal.hospital_id)
 
 
+@app.get("/api/v1/patients/{patient_id}")
+def patient_detail(patient_id: str, principal: Principal = Depends(current_principal)) -> dict:
+    patient = operations.patients.get(patient_id)
+    if patient is None:
+        raise HTTPException(status_code=404, detail="Patient not found")
+    enforce_tenant(principal, uuid.UUID(patient["hospital_id"]))
+    return {
+        **patient,
+        "timeline": operations.patient_timeline(patient_id),
+        "calls": [call for call in operations.calls if call["patient_id"] == patient_id],
+        "escalations": [
+            item for item in operations.escalations.values() if item["patient_id"] == patient_id
+        ],
+    }
+
+
 @app.get("/api/v1/campaigns")
 def list_campaigns(principal: Principal = Depends(current_principal)) -> list[dict]:
     return operations.tenant_rows(list(operations.campaigns.values()), principal.hospital_id)
@@ -270,6 +304,37 @@ def create_campaign(
         campaign_id,
     )
     return campaign
+
+
+@app.get("/api/v1/campaigns/{campaign_id}/workload-estimate")
+def campaign_workload_estimate(
+    campaign_id: str, principal: Principal = Depends(current_principal)
+) -> dict:
+    campaign = operations.campaigns.get(campaign_id)
+    if campaign is None:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    enforce_tenant(principal, uuid.UUID(campaign["hospital_id"]))
+    hospital = operations.hospitals[campaign["hospital_id"]]
+    eligible = sum(
+        patient["hospital_id"] == campaign["hospital_id"]
+        and patient["outreach_status"] != "ineligible"
+        for patient in operations.patients.values()
+    )
+    retry_factor = min(1.5, 0.35 * campaign["retry_limit"])
+    expected_attempts = ceil(eligible * (1 + retry_factor))
+    capacity = hospital["outbound_capacity"]
+    return {
+        "campaign_id": campaign_id,
+        "eligible_patients": eligible,
+        "expected_attempts": expected_attempts,
+        "outbound_capacity": capacity,
+        "minimum_call_waves": ceil(expected_attempts / capacity),
+        "assumptions": {
+            "retry_factor": retry_factor,
+            "average_call_minutes": 6,
+            "calling_window": hospital["calling_hours"],
+        },
+    }
 
 
 @app.post("/api/v1/discharges/import", status_code=202)
@@ -383,12 +448,26 @@ def update_escalation(
     if escalation is None:
         raise HTTPException(status_code=404, detail="Escalation not found")
     enforce_tenant(principal, uuid.UUID(escalation["hospital_id"]))
+    current = EscalationStatus(escalation["status"])
+    if request.status not in ESCALATION_TRANSITIONS.get(current, set()):
+        raise HTTPException(status_code=409, detail="Escalation transition is not allowed")
+    assigned_to = request.assigned_to or escalation["assigned_to"]
+    if (
+        request.status in {EscalationStatus.ASSIGNED, EscalationStatus.IN_REVIEW}
+        and not assigned_to
+    ):
+        raise HTTPException(status_code=422, detail="A reviewer assignment is required")
     if request.status == EscalationStatus.RESOLVED and not request.resolution:
         raise HTTPException(status_code=422, detail="Resolution is required")
     escalation.update(
         status=request.status.value,
-        assigned_to=request.assigned_to,
+        assigned_to=assigned_to,
         resolution=request.resolution,
+        resolved_at=(
+            datetime.now(UTC).isoformat()
+            if request.status == EscalationStatus.RESOLVED
+            else escalation.get("resolved_at")
+        ),
     )
     operations.record_audit(
         escalation["hospital_id"],
@@ -396,7 +475,11 @@ def update_escalation(
         "escalation.updated",
         "escalation",
         escalation_id,
-        request.model_dump(mode="json"),
+        {
+            **request.model_dump(mode="json"),
+            "from": current.value,
+            "to": request.status.value,
+        },
     )
     return escalation
 

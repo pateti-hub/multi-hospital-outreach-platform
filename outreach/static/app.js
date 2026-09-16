@@ -71,14 +71,15 @@ async function campaignsView() {
   return `<article class="panel"><div class="panel-head"><h2>Campaign operations</h2></div>${rows(data, [
     { label: "Name", key: "name" }, { label: "Status", render: (x) => badge(x.status) },
     { label: "Eligible", key: "eligible_patients" }, { label: "Retry limit", key: "retry_limit" },
-    { label: "Clinical window", render: (x) => `${x.clinical_window_hours}h` }
+    { label: "Clinical window", render: (x) => `${x.clinical_window_hours}h` },
+    { label: "Planning", render: (x) => `<button class="button secondary estimate-campaign" data-id="${escapeHtml(x.id)}">Estimate</button>` }
   ])}</article>`;
 }
 
 async function patientsView() {
   const data = await api("/patients");
   return `<article class="panel"><div class="panel-head"><h2>Synthetic discharge patients</h2><small>FHIR-shaped operational records</small></div>${rows(data, [
-    { label: "Patient", key: "display_name" }, { label: "ID", key: "external_id" },
+    { label: "Patient", render: (x) => `<button class="button secondary patient-detail" data-id="${escapeHtml(x.id)}">${escapeHtml(x.display_name)}</button>` }, { label: "ID", key: "external_id" },
     { label: "Condition", key: "condition" }, { label: "Risk", render: (x) => badge(x.risk) },
     { label: "Discharged", render: (x) => new Date(x.discharged_at).toLocaleString() }
   ])}</article>`;
@@ -89,7 +90,8 @@ async function escalationsView() {
   return `<article class="panel"><div class="panel-head"><h2>Human review worklist</h2></div>${rows(data, [
     { label: "Patient", key: "patient_name" }, { label: "Priority", render: (x) => badge(x.priority) },
     { label: "Status", render: (x) => badge(x.status) }, { label: "Trigger", key: "trigger" },
-    { label: "Protocol", key: "protocol_reference" }
+    { label: "Protocol", key: "protocol_reference" },
+    { label: "Action", render: (x) => x.status === "open" ? `<button class="button escalation-action" data-id="${escapeHtml(x.id)}" data-status="assigned">Assign to me</button>` : x.status === "assigned" ? `<button class="button escalation-action" data-id="${escapeHtml(x.id)}" data-status="in_review">Start review</button>` : x.status === "in_review" ? `<button class="button escalation-action" data-id="${escapeHtml(x.id)}" data-status="resolved">Resolve</button>` : "" }
   ])}</article>`;
 }
 
@@ -146,6 +148,29 @@ async function render() {
     $("#content").innerHTML = await views[state.view]();
     $("#advance")?.addEventListener("click", async () => { await api("/simulation/step", { method: "POST" }); render(); });
     $("#process-events")?.addEventListener("click", async () => { await api("/workflows/process", { method: "POST" }); render(); });
+    document.querySelectorAll(".patient-detail").forEach((button) => button.addEventListener("click", async () => {
+      const patient = await api(`/patients/${button.dataset.id}`);
+      $("#content").innerHTML = `<article class="panel"><div class="panel-head"><div><h2>${escapeHtml(patient.display_name)}</h2><small>${escapeHtml(patient.external_id)} · ${escapeHtml(patient.condition)}</small></div><button class="button secondary" id="back-patients">Back</button></div>
+        ${rows(patient.timeline, [
+          { label: "Time", render: (x) => new Date(x.occurred_at).toLocaleString() },
+          { label: "Event", key: "title" }, { label: "Type", render: (x) => badge(x.type) }
+        ])}</article>`;
+      $("#back-patients").addEventListener("click", render);
+    }));
+    document.querySelectorAll(".estimate-campaign").forEach((button) => button.addEventListener("click", async () => {
+      const estimate = await api(`/campaigns/${button.dataset.id}/workload-estimate`);
+      $("#alert").textContent = `${estimate.eligible_patients} eligible patients, approximately ${estimate.expected_attempts} attempts across at least ${estimate.minimum_call_waves} capacity waves.`;
+    }));
+    document.querySelectorAll(".escalation-action").forEach((button) => button.addEventListener("click", async () => {
+      const target = button.dataset.status;
+      const resolution = target === "resolved" ? window.prompt("Record the human follow-up action:") : null;
+      if (target === "resolved" && !resolution) return;
+      await api(`/escalations/${button.dataset.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: target, assigned_to: "Demo Clinical Reviewer", resolution })
+      });
+      render();
+    }));
   } catch (error) {
     $("#alert").textContent = error.message;
     $("#content").innerHTML = "";
