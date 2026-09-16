@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     access_token_minutes: int = 60
     default_timezone: str = "Asia/Kolkata"
     queue_lease_seconds: int = 90
+    persistence_enabled: bool = False
 
 
 @lru_cache

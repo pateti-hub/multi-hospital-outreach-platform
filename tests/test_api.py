@@ -1,3 +1,5 @@
+from datetime import UTC, datetime, timedelta
+
 from fastapi.testclient import TestClient
 
 from outreach.config import get_settings
@@ -62,4 +64,37 @@ def test_safety_evaluation_requires_authorized_role(monkeypatch) -> None:
     client = TestClient(app)
     headers = auth_headers(client, "mercy-general", "campaign_manager")
     assert client.get("/api/v1/evaluation/safety", headers=headers).status_code == 403
+    get_settings.cache_clear()
+
+
+def test_discharge_import_is_validated_and_idempotent(monkeypatch) -> None:
+    monkeypatch.setenv("DEMO_AUTH_ENABLED", "true")
+    get_settings.cache_clear()
+    client = TestClient(app)
+    headers = auth_headers(client, "mercy-general", "hospital_admin")
+    discharged = datetime.now(UTC) - timedelta(hours=2)
+    payload = {
+        "records": [
+            {
+                "external_patient_id": "IMPORT-TEST-001",
+                "name": {"given": "Synthetic", "family": "Import"},
+                "phone": "+15551234567",
+                "encounter_id": "ENC-001",
+                "care_setting": "inpatient",
+                "discharged_at": discharged.isoformat(),
+                "follow_up_deadline": (discharged + timedelta(hours=48)).isoformat(),
+                "condition_codes": ["Z48.81"],
+                "discharge_instructions": "Follow the approved care plan.",
+                "medication_summary": ["Synthetic medication record"],
+                "risk": "moderate",
+                "consent_for_outreach": True,
+                "preferred_language": "en",
+            }
+        ]
+    }
+    first = client.post("/api/v1/discharges/import", headers=headers, json=payload)
+    second = client.post("/api/v1/discharges/import", headers=headers, json=payload)
+    assert first.status_code == 202
+    assert first.json()["imported"] == 1
+    assert second.json()["duplicates"] == 1
     get_settings.cache_clear()

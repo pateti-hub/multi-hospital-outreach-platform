@@ -105,9 +105,7 @@ def assess(request: TriageRequest) -> TriageResult:
     ]
     disagreement = rules_classification != secondary_classification
     severity = {"routine": 0, "uncertain": 1, "concerning": 2, "urgent": 3}
-    final = max(
-        (rules_classification, secondary_classification), key=lambda value: severity[value]
-    )
+    final = max((rules_classification, secondary_classification), key=lambda value: severity[value])
     escalation_required = final != "routine" or disagreement
     return TriageResult(
         patient_id=request.patient_id,
