@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
@@ -25,6 +25,7 @@ from outreach.security import (
 )
 from outreach.simulation import QueueSimulation
 from outreach.triage import TriageRequest, assess
+from outreach.workflows import workflow_processor
 
 
 @asynccontextmanager
@@ -131,10 +132,15 @@ def scoped_snapshot(principal: Principal, snapshot: dict | None = None) -> dict:
 
 @app.get("/api/v1/health")
 def health() -> dict:
+    failed_events = sum(event["status"] == "failed" for event in operations.events.values())
     return {
-        "status": "healthy",
+        "status": "degraded" if failed_events else "healthy",
         "time": datetime.now(UTC).isoformat(),
-        "components": {"api": "healthy", "queue_simulator": "healthy"},
+        "components": {
+            "api": "healthy",
+            "queue_simulator": "healthy",
+            "workflow_processor": "degraded" if failed_events else "healthy",
+        },
     }
 
 
@@ -416,6 +422,13 @@ def run_triage(
         "created_at": datetime.now(UTC).isoformat(),
     }
     operations.ehr_records.append(ehr_record)
+    operations.publish_event(
+        hospital_id=patient["hospital_id"],
+        event_type="ehr.sync_requested",
+        aggregate_id=patient["id"],
+        payload={"record_id": ehr_record["id"]},
+        idempotency_key=f"ehr-sync:{ehr_record['id']}",
+    )
     operations.record_audit(
         patient["hospital_id"],
         principal.user_id,
@@ -447,6 +460,57 @@ def safety_evaluation(
     ),
 ) -> dict:
     return run_safety_evaluation()
+
+
+@app.get("/api/v1/events")
+def list_events(principal: Principal = Depends(current_principal)) -> list[dict]:
+    return operations.tenant_rows(list(operations.events.values()), principal.hospital_id)
+
+
+@app.post("/api/v1/workflows/process")
+def process_workflows(
+    principal: Principal = Depends(
+        require_roles(Role.PLATFORM_ADMIN, Role.HOSPITAL_ADMIN, Role.CAMPAIGN_MANAGER)
+    ),
+) -> dict:
+    hospital_id = None if principal.role == Role.PLATFORM_ADMIN else str(principal.hospital_id)
+    return workflow_processor.process_pending(operations, hospital_id=hospital_id)
+
+
+@app.get("/api/v1/notifications")
+def list_notifications(principal: Principal = Depends(current_principal)) -> list[dict]:
+    return operations.tenant_rows(list(operations.notifications.values()), principal.hospital_id)
+
+
+@app.get("/api/v1/metrics/system")
+def system_metrics(principal: Principal = Depends(current_principal)) -> dict:
+    events = operations.tenant_rows(list(operations.events.values()), principal.hospital_id)
+    notifications = operations.tenant_rows(
+        list(operations.notifications.values()), principal.hospital_id
+    )
+    queue = scoped_snapshot(principal)
+    failed = sum(event["status"] == "failed" for event in events)
+    pending = sum(event["status"] in {"pending", "retry_scheduled"} for event in events)
+    cutoff_risk = sum(
+        datetime.fromisoformat(task["deadline"]) <= datetime.now(UTC) + timedelta(hours=2)
+        and task["state"] not in {"completed", "escalated"}
+        for task in queue["tasks"]
+    )
+    return {
+        "status": "degraded" if failed else "healthy",
+        "queue_depth": sum(
+            value
+            for state, value in queue["state_counts"].items()
+            if state in {"pending", "retry_scheduled", "callback_scheduled"}
+        ),
+        "active_calls": queue["active_calls"],
+        "capacity": queue["capacity"],
+        "cutoff_risk_tasks": cutoff_risk,
+        "pending_events": pending,
+        "failed_events": failed,
+        "notifications_delivered": sum(item["status"] == "delivered" for item in notifications),
+        "audit_records": len(operations.tenant_rows(operations.audit_log, principal.hospital_id)),
+    }
 
 
 static_dir = Path(__file__).parent / "static"
