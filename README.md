@@ -8,13 +8,18 @@ and mock EHR updates.
 > **Prototype only.** Synthetic data only; not approved for real patient care.
 > This project does not claim HIPAA, SOC 2, or clinical certification.
 
-## Phase 1 implemented
+## Implemented prototype foundation
 
 - PostgreSQL-oriented healthcare and operations data model
 - JWT demo authentication, RBAC, and backend tenant enforcement
 - explainable queue priority scoring, deadline pressure, aging, and retry backoff
 - deterministic 30-patient capacity-constrained queue simulation
 - campaign lifecycle validation and operational queue metrics
+- responsive operations console for campaigns, queue, patients, escalations and audit
+- structured conservative triage with two independent assessment paths
+- prompt-injection-resistant protocol red flags and human escalation
+- controlled mock EHR observation writes and auditable workflow actions
+- repeatable safety evaluation with confusion matrix and false-negative rate
 - architecture, queue, and security documentation
 - repeatable unit tests
 
@@ -24,6 +29,8 @@ and mock EHR updates.
 cp .env.example .env
 docker compose up --build
 ```
+
+Operations console: `http://localhost:8000/`
 
 API documentation: `http://localhost:8000/docs`
 

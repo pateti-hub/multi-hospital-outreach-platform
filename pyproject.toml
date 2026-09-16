@@ -26,6 +26,9 @@ dev = [
 [tool.setuptools.packages.find]
 include = ["outreach*"]
 
+[tool.setuptools.package-data]
+outreach = ["static/*"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
