@@ -92,6 +92,29 @@ class OperationsStore:
                 "outreach_status": "pending",
             }
 
+        patients = list(self.patients.values())
+        outcomes = ["completed", "no_answer", "busy", "voicemail", "dropped", "callback"]
+        for index, patient in enumerate(patients[:12]):
+            campaign = next(
+                item
+                for item in self.campaigns.values()
+                if item["hospital_id"] == patient["hospital_id"]
+            )
+            started_at = datetime.fromisoformat(patient["discharged_at"]) + timedelta(minutes=30)
+            self.calls.append(
+                {
+                    "id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"synthetic-call:{index}")),
+                    "hospital_id": patient["hospital_id"],
+                    "patient_id": patient["id"],
+                    "campaign_id": campaign["id"],
+                    "attempt": 1,
+                    "outcome": outcomes[index % len(outcomes)],
+                    "started_at": started_at.isoformat(),
+                    "ended_at": (started_at + timedelta(minutes=4)).isoformat(),
+                    "documentation_status": "complete",
+                }
+            )
+
         urgent_patient = next(
             patient for patient in self.patients.values() if patient["risk"] == "critical"
         )
@@ -182,6 +205,51 @@ class OperationsStore:
         }
         self.events[event_id] = event
         return event, True
+
+    def patient_timeline(self, patient_id: str) -> list[dict]:
+        patient = self.patients[patient_id]
+        timeline = [
+            {
+                "type": "discharge",
+                "occurred_at": patient["discharged_at"],
+                "title": "Patient discharged",
+                "details": {
+                    "care_setting": patient["care_setting"],
+                    "follow_up_deadline": patient["follow_up_deadline"],
+                },
+            }
+        ]
+        timeline.extend(
+            {
+                "type": "call",
+                "occurred_at": call["started_at"],
+                "title": f"Outreach attempt: {call['outcome'].replace('_', ' ')}",
+                "details": call,
+            }
+            for call in self.calls
+            if call["patient_id"] == patient_id
+        )
+        timeline.extend(
+            {
+                "type": "escalation",
+                "occurred_at": escalation["created_at"],
+                "title": f"Escalation: {escalation['status']}",
+                "details": escalation,
+            }
+            for escalation in self.escalations.values()
+            if escalation["patient_id"] == patient_id
+        )
+        timeline.extend(
+            {
+                "type": "ehr",
+                "occurred_at": record["created_at"],
+                "title": f"Mock EHR {record['resource_type']} written",
+                "details": record,
+            }
+            for record in self.ehr_records
+            if record["patient_id"] == patient_id
+        )
+        return sorted(timeline, key=lambda item: item["occurred_at"], reverse=True)
 
 
 operations = OperationsStore()
