@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Synthetic multi-hospital post-discharge outreach operations prototype"
+    />
+    <title>Continuum | Outreach Operations</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <aside class="sidebar">
+      <a class="brand" href="/" aria-label="Continuum home">
+        <span class="brand-mark">C</span>
+        <span><strong>Continuum</strong><small>Care Operations</small></span>
+      </a>
+      <nav aria-label="Primary navigation">
+        <button class="nav-item active" data-view="overview">Overview</button>
+        <button class="nav-item" data-view="queue">Outreach Queue</button>
+        <button class="nav-item" data-view="campaigns">Campaigns</button>
+        <button class="nav-item" data-view="patients">Patients</button>
+        <button class="nav-item" data-view="escalations">Escalations</button>
+        <button class="nav-item" data-view="safety">Safety Evaluation</button>
+        <button class="nav-item" data-view="audit">Audit Trail</button>
+      </nav>
+      <div class="prototype-note">
+        <strong>Synthetic prototype</strong>
+        <span>Not for clinical use</span>
+      </div>
+    </aside>
+
+    <main>
+      <header>
+        <div>
+          <p class="eyebrow">Post-discharge outreach</p>
+          <h1 id="page-title">Operations overview</h1>
+        </div>
+        <div class="header-actions">
+          <label>
+            <span class="sr-only">Hospital</span>
+            <select id="hospital-select">
+              <option value="mercy-general">Mercy General Hospital</option>
+              <option value="riverside-medical">Riverside Medical Center</option>
+            </select>
+          </label>
+          <span class="health"><i></i> Healthy</span>
+        </div>
+      </header>
+
+      <div id="alert" role="alert" aria-live="assertive"></div>
+      <section id="content" aria-live="polite"></section>
+    </main>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

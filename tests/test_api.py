@@ -40,3 +40,26 @@ def test_cross_tenant_queue_is_denied(monkeypatch) -> None:
     )
     assert response.status_code == 403
     get_settings.cache_clear()
+
+
+def test_patient_listing_is_tenant_scoped(monkeypatch) -> None:
+    monkeypatch.setenv("DEMO_AUTH_ENABLED", "true")
+    get_settings.cache_clear()
+    client = TestClient(app)
+    headers = auth_headers(client, "riverside-medical", "hospital_admin")
+    response = client.get("/api/v1/patients", headers=headers)
+    assert response.status_code == 200
+    assert len(response.json()) == 15
+    assert {item["hospital_id"] for item in response.json()} == {
+        "22222222-2222-4222-8222-222222222222"
+    }
+    get_settings.cache_clear()
+
+
+def test_safety_evaluation_requires_authorized_role(monkeypatch) -> None:
+    monkeypatch.setenv("DEMO_AUTH_ENABLED", "true")
+    get_settings.cache_clear()
+    client = TestClient(app)
+    headers = auth_headers(client, "mercy-general", "campaign_manager")
+    assert client.get("/api/v1/evaluation/safety", headers=headers).status_code == 403
+    get_settings.cache_clear()

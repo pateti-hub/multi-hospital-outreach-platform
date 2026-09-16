@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from outreach.config import get_settings
-from outreach.enums import CampaignStatus, Role
+from outreach.enums import CampaignStatus, EscalationStatus, Role
+from outreach.operations import operations
+from outreach.safety import run_safety_evaluation
 from outreach.security import (
     Principal,
     create_access_token,
@@ -17,6 +21,7 @@ from outreach.security import (
     require_roles,
 )
 from outreach.simulation import QueueSimulation
+from outreach.triage import TriageRequest, assess
 
 app = FastAPI(
     title="Multi-Hospital Post-Discharge Outreach Platform",
@@ -40,6 +45,16 @@ class HospitalCreate(BaseModel):
     slug: str = Field(pattern=r"^[a-z0-9-]{2,80}$")
     timezone: str = "Asia/Kolkata"
     outbound_capacity: int = Field(default=10, ge=1, le=100)
+
+
+class CampaignStatusRequest(BaseModel):
+    status: CampaignStatus
+
+
+class EscalationUpdateRequest(BaseModel):
+    status: EscalationStatus
+    assigned_to: str | None = Field(default=None, max_length=180)
+    resolution: str | None = Field(default=None, max_length=2_000)
 
 
 DEMO_HOSPITALS = {
@@ -182,3 +197,145 @@ def queue_metrics(
         "capacity": snapshot["capacity"],
         "state_counts": snapshot["state_counts"],
     }
+
+
+@app.get("/api/v1/hospitals")
+def list_hospitals(principal: Principal = Depends(current_principal)) -> list[dict]:
+    rows = list(operations.hospitals.values())
+    if principal.role == Role.PLATFORM_ADMIN:
+        return rows
+    return [row for row in rows if row["id"] == str(principal.hospital_id)]
+
+
+@app.get("/api/v1/patients")
+def list_patients(principal: Principal = Depends(current_principal)) -> list[dict]:
+    return operations.tenant_rows(list(operations.patients.values()), principal.hospital_id)
+
+
+@app.get("/api/v1/campaigns")
+def list_campaigns(principal: Principal = Depends(current_principal)) -> list[dict]:
+    return operations.tenant_rows(list(operations.campaigns.values()), principal.hospital_id)
+
+
+@app.patch("/api/v1/campaigns/{campaign_id}/status")
+def update_campaign_status(
+    campaign_id: str,
+    request: CampaignStatusRequest,
+    principal: Principal = Depends(
+        require_roles(Role.HOSPITAL_ADMIN, Role.CAMPAIGN_MANAGER)
+    ),
+) -> dict:
+    campaign = operations.campaigns.get(campaign_id)
+    if campaign is None:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    enforce_tenant(principal, uuid.UUID(campaign["hospital_id"]))
+    current = CampaignStatus(campaign["status"])
+    if request.status not in ALLOWED_TRANSITIONS.get(current, set()):
+        raise HTTPException(status_code=409, detail="Campaign transition is not allowed")
+    campaign["status"] = request.status.value
+    operations.record_audit(
+        campaign["hospital_id"],
+        principal.user_id,
+        "campaign.status_changed",
+        "campaign",
+        campaign_id,
+        {"from": current.value, "to": request.status.value},
+    )
+    return campaign
+
+
+@app.get("/api/v1/escalations")
+def list_escalations(principal: Principal = Depends(current_principal)) -> list[dict]:
+    return operations.tenant_rows(
+        list(operations.escalations.values()), principal.hospital_id
+    )
+
+
+@app.patch("/api/v1/escalations/{escalation_id}")
+def update_escalation(
+    escalation_id: str,
+    request: EscalationUpdateRequest,
+    principal: Principal = Depends(
+        require_roles(Role.HOSPITAL_ADMIN, Role.CLINICAL_REVIEWER)
+    ),
+) -> dict:
+    escalation = operations.escalations.get(escalation_id)
+    if escalation is None:
+        raise HTTPException(status_code=404, detail="Escalation not found")
+    enforce_tenant(principal, uuid.UUID(escalation["hospital_id"]))
+    if request.status == EscalationStatus.RESOLVED and not request.resolution:
+        raise HTTPException(status_code=422, detail="Resolution is required")
+    escalation.update(
+        status=request.status.value,
+        assigned_to=request.assigned_to,
+        resolution=request.resolution,
+    )
+    operations.record_audit(
+        escalation["hospital_id"],
+        principal.user_id,
+        "escalation.updated",
+        "escalation",
+        escalation_id,
+        request.model_dump(mode="json"),
+    )
+    return escalation
+
+
+@app.post("/api/v1/triage")
+def run_triage(
+    request: TriageRequest,
+    principal: Principal = Depends(
+        require_roles(Role.HOSPITAL_ADMIN, Role.CLINICAL_REVIEWER)
+    ),
+) -> dict:
+    patient = operations.patients.get(request.patient_id)
+    if patient is None:
+        raise HTTPException(status_code=404, detail="Patient not found")
+    enforce_tenant(principal, uuid.UUID(patient["hospital_id"]))
+    result = assess(request)
+    ehr_record = {
+        "id": str(uuid.uuid4()),
+        "hospital_id": patient["hospital_id"],
+        "patient_id": patient["id"],
+        "resource_type": "Observation",
+        "status": "preliminary",
+        "source": "structured-outreach-triage",
+        "payload": result.model_dump(mode="json"),
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    operations.ehr_records.append(ehr_record)
+    operations.record_audit(
+        patient["hospital_id"],
+        principal.user_id,
+        "triage.completed",
+        "patient",
+        patient["id"],
+        {
+            "classification": result.final_classification,
+            "escalation_required": result.escalation_required,
+        },
+    )
+    return {"triage": result, "mock_ehr_record": ehr_record}
+
+
+@app.get("/api/v1/mock-ehr/records")
+def list_ehr_records(principal: Principal = Depends(current_principal)) -> list[dict]:
+    return operations.tenant_rows(operations.ehr_records, principal.hospital_id)
+
+
+@app.get("/api/v1/audit")
+def list_audit_log(principal: Principal = Depends(current_principal)) -> list[dict]:
+    return operations.tenant_rows(operations.audit_log, principal.hospital_id)
+
+
+@app.get("/api/v1/evaluation/safety")
+def safety_evaluation(
+    _: Principal = Depends(
+        require_roles(Role.PLATFORM_ADMIN, Role.HOSPITAL_ADMIN, Role.CLINICAL_REVIEWER)
+    ),
+) -> dict:
+    return run_safety_evaluation()
+
+
+static_dir = Path(__file__).parent / "static"
+app.mount("/", StaticFiles(directory=static_dir, html=True), name="operations-console")
