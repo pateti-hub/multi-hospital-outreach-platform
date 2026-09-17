@@ -9,13 +9,17 @@ from outreach.database import session_factory
 from outreach.enums import CampaignStatus, OutreachState
 from outreach.ingestion import DischargeImport, evaluate_eligibility
 from outreach.models import (
+    AIUsage,
     AuditLog,
+    CallRecord,
     Campaign,
     Discharge,
     EHRRecord,
     Encounter,
+    Escalation,
     Event,
     Hospital,
+    KnowledgeResource,
     OutreachTask,
     Patient,
     Protocol,
@@ -163,6 +167,91 @@ class PostgresRepository:
                     )
                 )
             await session.commit()
+
+    async def seed_missing_clinical_records(self) -> None:
+        """Add versioned knowledge and escalation fixtures to existing databases."""
+        async with session_factory()() as session, session.begin():
+            if not await session.scalar(select(func.count()).select_from(KnowledgeResource)):
+                hospitals = list((await session.scalars(select(Hospital))).all())
+                for hospital in hospitals:
+                    resources = [
+                        (
+                            "Post-discharge red-flag protocol",
+                            "protocol",
+                            (
+                                "Escalate chest pain, inability to breathe, unconsciousness, "
+                                "stroke signs, severe bleeding, rapid deterioration, or "
+                                "meaningful uncertainty to a clinical reviewer immediately."
+                            ),
+                            "GENERAL-POST-DISCHARGE-v1 §4",
+                        ),
+                        (
+                            "Outreach operating guidance",
+                            "operations",
+                            (
+                                "Verify the patient can speak safely, collect protocol-driven "
+                                "responses, do not diagnose or change medication, and document "
+                                "callback requests using the patient's hospital timezone."
+                            ),
+                            "OUTREACH-OPERATIONS-v1 §2",
+                        ),
+                    ]
+                    for title, resource_type, content, source in resources:
+                        session.add(
+                            KnowledgeResource(
+                                hospital_id=hospital.id,
+                                title=title,
+                                resource_type=resource_type,
+                                content=content,
+                                source_reference=source,
+                                version="1.0",
+                                active=True,
+                                created_at=datetime.now(UTC),
+                            )
+                        )
+
+            if not await session.scalar(select(func.count()).select_from(Escalation)):
+                for source in operations.escalations.values():
+                    patient_id = uuid.UUID(source["patient_id"])
+                    task = await session.scalar(
+                        select(OutreachTask).where(OutreachTask.patient_id == patient_id).limit(1)
+                    )
+                    if task is None:
+                        continue
+                    call = CallRecord(
+                        hospital_id=task.hospital_id,
+                        task_id=task.id,
+                        outcome="escalated",
+                        started_at=datetime.fromisoformat(source["created_at"]),
+                        ended_at=datetime.fromisoformat(source["created_at"]),
+                        transcript=None,
+                        structured_result={
+                            "evidence": source["evidence"],
+                            "synthetic": True,
+                        },
+                        documentation_status="complete",
+                    )
+                    session.add(call)
+                    await session.flush()
+                    session.add(
+                        Escalation(
+                            id=uuid.UUID(source["id"]),
+                            hospital_id=task.hospital_id,
+                            call_id=call.id,
+                            patient_id=patient_id,
+                            status=source["status"],
+                            priority=source["priority"],
+                            trigger=source["trigger"],
+                            evidence={
+                                "indicators": source["evidence"],
+                                "protocol_reference": source["protocol_reference"],
+                            },
+                            consensus=source["consensus"],
+                            assigned_user_id=None,
+                            resolution=None,
+                            resolved_at=None,
+                        )
+                    )
 
     async def counts(self) -> dict[str, int]:
         async with session_factory()() as session:
@@ -603,6 +692,24 @@ class PostgresRepository:
                     },
                 )
             )
+            session.add(
+                AIUsage(
+                    hospital_id=hospital_id,
+                    patient_id=patient_id,
+                    agent="clinical_triage",
+                    provider="deterministic",
+                    model="protocol-consensus-v1",
+                    prompt_version="triage-1.0",
+                    purpose="post_discharge_triage",
+                    latency_ms=0,
+                    input_tokens=None,
+                    output_tokens=None,
+                    estimated_cost_usd="0",
+                    success=True,
+                    validation_status="valid",
+                    created_at=now,
+                )
+            )
             return {
                 "id": str(record.id),
                 "hospital_id": str(hospital_id),
@@ -633,6 +740,162 @@ class PostgresRepository:
                     "payload": row.payload,
                     "created_at": row.created_at.isoformat(),
                     "synced_at": row.synced_at.isoformat() if row.synced_at else None,
+                }
+                for row in rows
+            ]
+
+    async def list_protocols(self, hospital_id: uuid.UUID) -> list[dict]:
+        async with session_factory()() as session:
+            rows = list(
+                (
+                    await session.scalars(
+                        select(Protocol)
+                        .where(
+                            Protocol.hospital_id == hospital_id,
+                            Protocol.active.is_(True),
+                        )
+                        .order_by(Protocol.name)
+                    )
+                ).all()
+            )
+            return [
+                {
+                    "id": str(row.id),
+                    "hospital_id": str(row.hospital_id),
+                    "name": row.name,
+                    "version": row.version,
+                    "content": row.content,
+                    "active": row.active,
+                }
+                for row in rows
+            ]
+
+    async def search_knowledge(
+        self, hospital_id: uuid.UUID, query: str, limit: int = 5
+    ) -> list[dict]:
+        terms = [term for term in query.lower().split() if len(term) >= 3][:6]
+        async with session_factory()() as session:
+            statement = select(KnowledgeResource).where(
+                KnowledgeResource.hospital_id == hospital_id,
+                KnowledgeResource.active.is_(True),
+            )
+            rows = list((await session.scalars(statement)).all())
+            ranked = sorted(
+                rows,
+                key=lambda row: sum(term in f"{row.title} {row.content}".lower() for term in terms),
+                reverse=True,
+            )
+            return [
+                {
+                    "id": str(row.id),
+                    "title": row.title,
+                    "resource_type": row.resource_type,
+                    "snippet": row.content[:500],
+                    "source_reference": row.source_reference,
+                    "version": row.version,
+                }
+                for row in ranked[:limit]
+                if not terms or any(term in f"{row.title} {row.content}".lower() for term in terms)
+            ]
+
+    async def list_escalations(self, hospital_id: uuid.UUID) -> list[dict]:
+        async with session_factory()() as session:
+            rows = (
+                await session.execute(
+                    select(Escalation, Patient, CallRecord)
+                    .join(Patient, Patient.id == Escalation.patient_id)
+                    .join(CallRecord, CallRecord.id == Escalation.call_id)
+                    .where(Escalation.hospital_id == hospital_id)
+                    .order_by(Escalation.resolved_at.asc().nullsfirst())
+                )
+            ).all()
+            return [
+                {
+                    "id": str(row.id),
+                    "hospital_id": str(row.hospital_id),
+                    "patient_id": str(row.patient_id),
+                    "patient_name": patient.name.get("text", "Synthetic patient"),
+                    "status": row.status,
+                    "priority": row.priority,
+                    "trigger": row.trigger,
+                    "evidence": row.evidence.get("indicators", []),
+                    "protocol_reference": row.evidence.get("protocol_reference", "unknown"),
+                    "consensus": row.consensus,
+                    "assigned_to": row.evidence.get("assigned_to"),
+                    "created_at": call.started_at.isoformat(),
+                    "resolution": row.resolution,
+                    "resolved_at": (row.resolved_at.isoformat() if row.resolved_at else None),
+                }
+                for row, patient, call in rows
+            ]
+
+    async def update_escalation(
+        self,
+        *,
+        escalation_id: uuid.UUID,
+        hospital_id: uuid.UUID,
+        actor_id: uuid.UUID,
+        status: str,
+        assigned_to: str | None,
+        resolution: str | None,
+    ) -> dict | None:
+        async with session_factory()() as session, session.begin():
+            row = await session.scalar(
+                select(Escalation)
+                .where(
+                    Escalation.id == escalation_id,
+                    Escalation.hospital_id == hospital_id,
+                )
+                .with_for_update()
+            )
+            if row is None:
+                return None
+            previous = row.status
+            evidence = dict(row.evidence)
+            if assigned_to:
+                evidence["assigned_to"] = assigned_to
+            row.evidence = evidence
+            row.status = status
+            row.resolution = resolution
+            if status == "resolved":
+                row.resolved_at = datetime.now(UTC)
+            session.add(
+                AuditLog(
+                    hospital_id=hospital_id,
+                    actor_id=actor_id,
+                    action="escalation.updated",
+                    resource_type="escalation",
+                    resource_id=row.id,
+                    occurred_at=datetime.now(UTC),
+                    details={"from": previous, "to": status},
+                )
+            )
+        rows = await self.list_escalations(hospital_id)
+        return next((item for item in rows if item["id"] == str(escalation_id)), None)
+
+    async def list_ai_usage(self, hospital_id: uuid.UUID | None) -> list[dict]:
+        async with session_factory()() as session:
+            statement = select(AIUsage)
+            if hospital_id:
+                statement = statement.where(AIUsage.hospital_id == hospital_id)
+            rows = list(
+                (
+                    await session.scalars(statement.order_by(AIUsage.created_at.desc()).limit(250))
+                ).all()
+            )
+            return [
+                {
+                    "id": str(row.id),
+                    "hospital_id": str(row.hospital_id),
+                    "agent": row.agent,
+                    "provider": row.provider,
+                    "model": row.model,
+                    "prompt_version": row.prompt_version,
+                    "purpose": row.purpose,
+                    "latency_ms": row.latency_ms,
+                    "success": row.success,
+                    "validation_status": row.validation_status,
+                    "created_at": row.created_at.isoformat(),
                 }
                 for row in rows
             ]
