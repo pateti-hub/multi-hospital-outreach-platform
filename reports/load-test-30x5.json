@@ -1,0 +1,11 @@
+{
+  "requests": 30,
+  "concurrency": 5,
+  "successful": 30,
+  "failed": 0,
+  "latency_ms": {
+    "average": 1175.85,
+    "p95": 1192.27,
+    "maximum": 1221.76
+  }
+}

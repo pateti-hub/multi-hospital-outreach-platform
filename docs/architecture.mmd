@@ -1,0 +1,12 @@
+flowchart LR
+  UI[Operations Console] --> API[FastAPI + RBAC]
+  IDP[JWT / Supabase Auth] --> API
+  API --> DB[(PostgreSQL)]
+  API --> Q[Durable Queue]
+  Q --> W[Worker Runtime]
+  W --> V[Pipecat + Daily WebRTC]
+  W --> AI[Intake / Triage / Consensus / Documentation]
+  AI --> T[Controlled Tools]
+  T --> EHR[Mock EHR Adapter]
+  T --> EV[Events + Audit + Notifications]
+  DB --> OBS[Dashboards + Health]

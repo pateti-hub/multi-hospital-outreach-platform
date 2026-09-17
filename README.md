@@ -69,3 +69,8 @@ Demo authentication is deliberately evaluation-only. Set
 - [Conversation and documentation workflow](docs/CONVERSATION_WORKFLOW.md)
 - [Requirements traceability](docs/REQUIREMENTS_TRACEABILITY.md)
 - [Demo video script](docs/DEMO_VIDEO_SCRIPT.md)
+- [Assumptions and ambiguities](docs/ASSUMPTIONS_AND_AMBIGUITIES.md)
+- [Evaluator access](docs/EVALUATOR_ACCESS.md)
+- [Testing](docs/TESTING.md)
+- [One-time submission checklist](docs/SUBMISSION_CHECKLIST.md)
+- [Final submission package](docs/FINAL_SUBMISSION.md)

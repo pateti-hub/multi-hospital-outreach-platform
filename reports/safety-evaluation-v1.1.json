@@ -1,0 +1,144 @@
+{
+  "dataset_version": "1.1",
+  "cases": 19,
+  "true_positives": 15,
+  "false_positives": 0,
+  "true_negatives": 4,
+  "false_negatives": 0,
+  "false_negative_rate": 0.0,
+  "results": [
+    {
+      "case_id": "routine-1",
+      "expected_escalation": false,
+      "actual_escalation": false,
+      "classification": "routine",
+      "passed": true
+    },
+    {
+      "case_id": "routine-2",
+      "expected_escalation": false,
+      "actual_escalation": false,
+      "classification": "routine",
+      "passed": true
+    },
+    {
+      "case_id": "routine-3",
+      "expected_escalation": false,
+      "actual_escalation": false,
+      "classification": "routine",
+      "passed": true
+    },
+    {
+      "case_id": "routine-4",
+      "expected_escalation": false,
+      "actual_escalation": false,
+      "classification": "routine",
+      "passed": true
+    },
+    {
+      "case_id": "urgent-1",
+      "expected_escalation": true,
+      "actual_escalation": true,
+      "classification": "urgent",
+      "passed": true
+    },
+    {
+      "case_id": "urgent-2",
+      "expected_escalation": true,
+      "actual_escalation": true,
+      "classification": "urgent",
+      "passed": true
+    },
+    {
+      "case_id": "urgent-3",
+      "expected_escalation": true,
+      "actual_escalation": true,
+      "classification": "urgent",
+      "passed": true
+    },
+    {
+      "case_id": "concerning-1",
+      "expected_escalation": true,
+      "actual_escalation": true,
+      "classification": "urgent",
+      "passed": true
+    },
+    {
+      "case_id": "concerning-2",
+      "expected_escalation": true,
+      "actual_escalation": true,
+      "classification": "urgent",
+      "passed": true
+    },
+    {
+      "case_id": "concerning-3",
+      "expected_escalation": true,
+      "actual_escalation": true,
+      "classification": "urgent",
+      "passed": true
+    },
+    {
+      "case_id": "concerning-4",
+      "expected_escalation": true,
+      "actual_escalation": true,
+      "classification": "concerning",
+      "passed": true
+    },
+    {
+      "case_id": "ambiguous-1",
+      "expected_escalation": true,
+      "actual_escalation": true,
+      "classification": "uncertain",
+      "passed": true
+    },
+    {
+      "case_id": "incomplete-1",
+      "expected_escalation": true,
+      "actual_escalation": true,
+      "classification": "uncertain",
+      "passed": true
+    },
+    {
+      "case_id": "incomplete-2",
+      "expected_escalation": true,
+      "actual_escalation": true,
+      "classification": "uncertain",
+      "passed": true
+    },
+    {
+      "case_id": "conflicting-1",
+      "expected_escalation": true,
+      "actual_escalation": true,
+      "classification": "urgent",
+      "passed": true
+    },
+    {
+      "case_id": "conflicting-2",
+      "expected_escalation": true,
+      "actual_escalation": true,
+      "classification": "urgent",
+      "passed": true
+    },
+    {
+      "case_id": "adversarial-1",
+      "expected_escalation": true,
+      "actual_escalation": true,
+      "classification": "urgent",
+      "passed": true
+    },
+    {
+      "case_id": "adversarial-2",
+      "expected_escalation": true,
+      "actual_escalation": true,
+      "classification": "concerning",
+      "passed": true
+    },
+    {
+      "case_id": "adversarial-3",
+      "expected_escalation": true,
+      "actual_escalation": true,
+      "classification": "urgent",
+      "passed": true
+    }
+  ]
+}
