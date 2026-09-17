@@ -29,7 +29,7 @@ from outreach.security import (
 )
 from outreach.simulation import QueueSimulation
 from outreach.triage import TriageRequest, assess
-from outreach.worker import stop_worker, worker_loop
+from outreach.worker import run_worker_cycle, stop_worker, worker_loop
 from outreach.workflows import workflow_processor
 
 
@@ -171,6 +171,14 @@ async def health() -> dict:
             "database": ("healthy" if get_settings().persistence_enabled else "disabled"),
             "background_worker": (
                 "healthy" if get_settings().background_workers_enabled else "manual"
+            ),
+            "queue_execution": (
+                "automatic" if get_settings().auto_queue_enabled else "evaluator_controlled"
+            ),
+            "authentication": (
+                "supabase_and_local"
+                if get_settings().supabase_auth_enabled
+                else "local_signed_tokens"
             ),
         },
     }
@@ -803,6 +811,17 @@ def process_workflows(
 ) -> dict:
     hospital_id = None if principal.role == Role.PLATFORM_ADMIN else str(principal.hospital_id)
     return workflow_processor.process_pending(operations, hospital_id=hospital_id)
+
+
+@app.post("/api/v1/workers/run-cycle")
+async def run_background_cycle(
+    _: Principal = Depends(
+        require_roles(Role.PLATFORM_ADMIN, Role.HOSPITAL_ADMIN, Role.CAMPAIGN_MANAGER)
+    ),
+) -> dict:
+    if not get_settings().persistence_enabled:
+        raise HTTPException(status_code=409, detail="Persistent workers require PostgreSQL")
+    return await run_worker_cycle()
 
 
 @app.get("/api/v1/notifications")

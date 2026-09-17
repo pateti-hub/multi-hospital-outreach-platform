@@ -7,7 +7,7 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from outreach.enums import OutreachState
-from outreach.models import AuditLog, OutreachTask
+from outreach.models import AuditLog, Campaign, Event, OutreachTask
 
 
 class DurableScheduler:
@@ -45,8 +45,10 @@ class DurableScheduler:
 
             statement = (
                 select(OutreachTask)
+                .join(Campaign, Campaign.id == OutreachTask.campaign_id)
                 .where(
                     OutreachTask.hospital_id == hospital_id,
+                    Campaign.status == "running",
                     OutreachTask.state.in_(
                         [
                             OutreachState.PENDING.value,
@@ -73,6 +75,57 @@ class DurableScheduler:
                 task.lease_expires_at = lease_expiry
                 task.attempt_count += 1
             return tasks
+
+    async def recover_expired(self, session: AsyncSession, hospital_id: uuid.UUID) -> int:
+        """Move missed clinical windows to explicit human follow-up."""
+        now = datetime.now(UTC)
+        async with session.begin():
+            tasks = list(
+                (
+                    await session.scalars(
+                        select(OutreachTask)
+                        .where(
+                            OutreachTask.hospital_id == hospital_id,
+                            OutreachTask.state.in_(
+                                [
+                                    OutreachState.PENDING.value,
+                                    OutreachState.RETRY_SCHEDULED.value,
+                                    OutreachState.CALLBACK_SCHEDULED.value,
+                                ]
+                            ),
+                            OutreachTask.deadline <= now,
+                        )
+                        .with_for_update(skip_locked=True)
+                    )
+                ).all()
+            )
+            for task in tasks:
+                task.state = OutreachState.MANUAL_FOLLOW_UP.value
+                task.lease_owner = None
+                task.lease_expires_at = None
+                session.add(
+                    Event(
+                        hospital_id=hospital_id,
+                        event_type="manual_follow_up.created",
+                        aggregate_id=task.id,
+                        payload={"reason": "clinical_window_expired"},
+                        idempotency_key=f"expired:{task.id}",
+                        occurred_at=now,
+                        processed_at=now,
+                    )
+                )
+                session.add(
+                    AuditLog(
+                        hospital_id=hospital_id,
+                        actor_id=None,
+                        action="queue.clinical_window_expired",
+                        resource_type="outreach_task",
+                        resource_id=task.id,
+                        occurred_at=now,
+                        details={"recovery": "manual_follow_up"},
+                    )
+                )
+            return len(tasks)
 
     async def heartbeat(
         self,

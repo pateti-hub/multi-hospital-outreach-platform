@@ -26,6 +26,9 @@ and mock EHR updates.
 - versioned hospital protocols, tenant-aware retrieval and AI usage tracing
 - separated intake, triage, escalation-consensus, and documentation workflow
 - idempotent persistent call records and background escalation notifications
+- optional autonomous queue execution, stale-lease recovery and deadline handling
+- optional Supabase authentication and provider-neutral circuit breaking
+- validated replaceable mock-EHR adapter
 - architecture, queue, and security documentation
 - repeatable unit tests
 
@@ -62,3 +65,5 @@ Demo authentication is deliberately evaluation-only. Set
 - [Evaluator demo](docs/DEMO_GUIDE.md)
 - [Knowledge and retrieval](docs/KNOWLEDGE_AND_RETRIEVAL.md)
 - [Conversation and documentation workflow](docs/CONVERSATION_WORKFLOW.md)
+- [Requirements traceability](docs/REQUIREMENTS_TRACEABILITY.md)
+- [Demo video script](docs/DEMO_VIDEO_SCRIPT.md)

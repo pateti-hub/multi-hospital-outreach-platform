@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     persistence_enabled: bool = False
     background_workers_enabled: bool = False
     worker_interval_seconds: int = 30
+    auto_queue_enabled: bool = False
+    supabase_auth_enabled: bool = False
+    supabase_url: str | None = None
+    supabase_anon_key: str | None = None
 
     @field_validator("database_url")
     @classmethod
