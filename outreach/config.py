@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     default_timezone: str = "Asia/Kolkata"
     queue_lease_seconds: int = 90
     persistence_enabled: bool = False
+    background_workers_enabled: bool = False
+    worker_interval_seconds: int = 30
 
     @field_validator("database_url")
     @classmethod
