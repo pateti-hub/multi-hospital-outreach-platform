@@ -30,6 +30,10 @@ untrusted evidence and cannot override authorization, escalation rules, or syste
 speech, a deterministic provider, and a bounded circuit breaker. Production adapters can
 implement conversation generation, classification, speech-to-text, and text-to-speech
 without changing clinical policy or authorization logic.
+
+The deployed voice boundary uses a PHI-minimized Pipecat/Daily WebRTC session request.
+Only the opaque outreach task reference is sent to the voice service; patient details remain
+behind the authorized application API.
 Every invocation should record provider, model, prompt version, purpose, latency,
 validation result, token usage, estimated cost, and retrieval references without placing
 unnecessary patient content in logs.

@@ -14,7 +14,7 @@ This maps the challenge requirements to the deployed synthetic prototype.
 | Concurrency | tenant advisory lock, leases and `SKIP LOCKED` | Implemented |
 | Recovery | stale lease, expired window and manual follow-up handling | Implemented |
 | Simulation | 30 mixed patients with constrained capacity | Implemented |
-| Background work | optional autonomous multi-tenant queue cycle | Implemented |
+| Background work | separately deployable autonomous multi-tenant worker runtime | Implemented |
 | AI architecture | intake, triage, two assessments, consensus and documentation | Implemented |
 | Controlled tools | auth, validation, idempotency, execution and audit | Implemented |
 | Escalations | assignment, review, resolution, evidence and notifications | Implemented |
@@ -23,7 +23,8 @@ This maps the challenge requirements to the deployed synthetic prototype.
 | Safety evaluation | fixed dataset, confusion matrix and false-negative rate | Implemented |
 | Provider abstraction | structured-AI/speech interfaces and circuit breaker | Implemented |
 | Production auth path | optional Supabase bearer-token validation | Implemented |
-| Real outbound calls | simulator and provider boundary | Optional enhancement |
+| Streaming voice | Pipecat/Daily WebRTC gateway with expiring sessions | Implemented |
+| PSTN outbound calls | requires a configured SIP/telephony account | Optional enhancement |
 | Email/SMS | dashboard delivery; external adapters not configured | Optional enhancement |
 | Real EHR | replaceable mock adapter | Intentionally mocked |
 | Compliance | production security roadmap | Not claimed |
