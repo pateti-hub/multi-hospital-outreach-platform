@@ -1,0 +1,11 @@
+{
+  "name": "multi-hospital-outreach-e2e",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node smoke.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.52.0"
+  }
+}

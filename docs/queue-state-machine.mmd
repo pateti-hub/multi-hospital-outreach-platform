@@ -1,0 +1,14 @@
+stateDiagram-v2
+  [*] --> PENDING
+  PENDING --> CALLING: reserve
+  RETRY_SCHEDULED --> CALLING: backoff elapsed
+  CALLBACK_SCHEDULED --> CALLING: callback due
+  CALLING --> COMPLETED: success
+  CALLING --> RETRY_SCHEDULED: retryable outcome
+  CALLING --> ESCALATED: clinical concern
+  CALLING --> MANUAL_FOLLOW_UP: retries exhausted
+  PENDING --> MANUAL_FOLLOW_UP: cutoff missed
+  CALLING --> RETRY_SCHEDULED: stale lease
+  COMPLETED --> [*]
+  ESCALATED --> [*]
+  MANUAL_FOLLOW_UP --> [*]
