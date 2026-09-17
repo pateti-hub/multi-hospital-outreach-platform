@@ -26,8 +26,10 @@ untrusted evidence and cannot override authorization, escalation rules, or syste
 
 ## Provider abstraction
 
-Production adapters should expose separate interfaces for conversation generation,
-structured generation, classification, retrieval, speech-to-text, and text-to-speech.
+`outreach.providers` defines provider-neutral interfaces for structured generation and
+speech, a deterministic provider, and a bounded circuit breaker. Production adapters can
+implement conversation generation, classification, speech-to-text, and text-to-speech
+without changing clinical policy or authorization logic.
 Every invocation should record provider, model, prompt version, purpose, latency,
 validation result, token usage, estimated cost, and retrieval references without placing
 unnecessary patient content in logs.

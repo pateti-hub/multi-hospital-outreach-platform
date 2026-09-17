@@ -3,12 +3,15 @@
 ## Implemented foundations
 
 - signed bearer tokens with explicit role and hospital context;
+- optional Supabase token validation using protected application metadata;
 - role checks and backend tenant enforcement;
 - tenant identifiers on patient-domain tables;
 - secrets supplied through environment configuration;
 - synthetic records only;
 - bounded, explainable queue decisions;
-- audit/event models and idempotency fields.
+- audit/event models and idempotency fields;
+- validated mock-EHR writes through a replaceable adapter;
+- provider-neutral circuit breaking and explicit failure behavior.
 
 ## Required before real patient use
 
@@ -25,9 +28,8 @@ content, exports, and platform aggregates must be separately authorized and audi
 ## Intentional prototype tradeoffs
 
 - demo authentication is disabled by default and is evaluation-only;
-- the first milestone uses an in-memory deterministic queue simulator;
-- hospital creation is not yet persisted;
-- the mock EHR, event worker, notifications, retrieval, AI agents, UI, and deployment
-  are subsequent milestones;
-- no real telephony is required for the core queue demonstration;
+- both evaluator-controlled and optional autonomous persistent queue execution are provided;
+- operational records are persisted when PostgreSQL is enabled;
+- voice uses a deterministic call/conversation simulator; real telephony is optional;
+- the deployed prototype delivers dashboard notifications; email/SMS need provider adapters;
 - clinical scenarios are synthetic and do not establish medical correctness.

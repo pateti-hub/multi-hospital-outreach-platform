@@ -11,11 +11,22 @@ APP_SECRET=<random value of at least 24 characters; recommended>
 DATABASE_URL=<Railway PostgreSQL asyncpg URL>
 DEMO_AUTH_ENABLED=true
 PERSISTENCE_ENABLED=true
+BACKGROUND_WORKERS_ENABLED=true
+AUTO_QUEUE_ENABLED=true
 ENVIRONMENT=production
 ```
 
-Do not commit these values. The prototype dashboard requires evaluation-mode demo
-authentication; a real deployment must replace it with enterprise identity and MFA.
+Optional Supabase authentication:
+
+```text
+SUPABASE_AUTH_ENABLED=true
+SUPABASE_URL=<project URL>
+SUPABASE_ANON_KEY=<public anonymous key>
+```
+
+Do not commit these values. Supabase authorization reads only administrator-controlled
+`app_metadata.role` and `app_metadata.hospital_id`; user-editable metadata is ignored.
+Evaluation-mode demo authentication should be disabled outside a synthetic evaluation.
 When `APP_SECRET` is omitted, the application generates an ephemeral random signing key.
 That is safe for a single prototype instance, but tokens are invalidated after every restart
 and it must not be used for multi-replica deployments.
@@ -26,8 +37,8 @@ Managed migrations are required before production use.
 
 Standard Supabase `postgresql://` and legacy `postgres://` connection strings are normalized
 to SQLAlchemy's asyncpg driver. `sslmode=require` is also normalized to asyncpg's `ssl`
-parameter. Only `DATABASE_URL` is required for PostgreSQL persistence; the anonymous
-Supabase browser key is not used by this backend.
+parameter. `DATABASE_URL` is required for persistence. Supabase URL and anonymous key
+are used only when external token validation is explicitly enabled.
 
 ## Local Docker
 

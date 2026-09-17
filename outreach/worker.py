@@ -3,11 +3,24 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import uuid
 
 from outreach.config import get_settings
 from outreach.repository import postgres_repository
 
 logger = logging.getLogger("outreach.worker")
+
+
+async def run_worker_cycle() -> dict[str, int]:
+    settings = get_settings()
+    advanced = 0
+    if settings.auto_queue_enabled:
+        hospitals = await postgres_repository.list_hospitals(None)
+        for hospital in hospitals:
+            await postgres_repository.advance_queue(uuid.UUID(hospital["id"]))
+            advanced += 1
+    delivered = await postgres_repository.deliver_pending_escalation_notifications()
+    return {"hospitals_advanced": advanced, "notifications_delivered": delivered}
 
 
 async def worker_loop() -> None:
@@ -19,9 +32,12 @@ async def worker_loop() -> None:
     settings = get_settings()
     while True:
         try:
-            delivered = await postgres_repository.deliver_pending_escalation_notifications()
-            if delivered:
-                logger.info("Delivered %s escalation notification(s)", delivered)
+            result = await run_worker_cycle()
+            if result["notifications_delivered"]:
+                logger.info(
+                    "Delivered %s operational notification(s)",
+                    result["notifications_delivered"],
+                )
         except Exception:
             # The operational state remains retryable in PostgreSQL. Avoid
             # logging patient content or connection credentials.

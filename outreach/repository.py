@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import func, select
 
 from outreach.database import session_factory
+from outreach.ehr import EHRWriteRequest, mock_ehr
 from outreach.enums import CampaignStatus, OutreachState
 from outreach.ingestion import DischargeImport, evaluate_eligibility
 from outreach.models import (
@@ -557,6 +558,12 @@ class PostgresRepository:
                     )
                 )
             ).all()
+            call_statement = select(CallRecord).order_by(CallRecord.ended_at.desc())
+            if hospital_id:
+                call_statement = call_statement.where(CallRecord.hospital_id == hospital_id)
+            latest_outcomes: dict[uuid.UUID, str] = {}
+            for call in (await session.scalars(call_statement)).all():
+                latest_outcomes.setdefault(call.task_id, call.outcome)
             tasks = [
                 {
                     "id": str(task.id),
@@ -569,7 +576,7 @@ class PostgresRepository:
                     "attempts": task.attempt_count,
                     "callback_at": (task.callback_at.isoformat() if task.callback_at else None),
                     "priority": task.priority_score,
-                    "last_outcome": None,
+                    "last_outcome": latest_outcomes.get(task.id),
                 }
                 for task, patient, discharge, hospital in rows
             ]
@@ -600,6 +607,8 @@ class PostgresRepository:
     async def advance_queue(self, hospital_id: uuid.UUID) -> dict:
         async with session_factory()() as session:
             await durable_scheduler.recover_stale(session, hospital_id)
+        async with session_factory()() as session:
+            await durable_scheduler.recover_expired(session, hospital_id)
         await self._complete_active(hospital_id)
         async with session_factory()() as session:
             capacity = int(
@@ -647,6 +656,22 @@ class PostgresRepository:
                     task.callback_at = task.available_at
                 task.lease_owner = None
                 task.lease_expires_at = None
+                session.add(
+                    CallRecord(
+                        hospital_id=hospital_id,
+                        task_id=task.id,
+                        outcome=outcome,
+                        started_at=now,
+                        ended_at=now,
+                        transcript=None,
+                        structured_result={
+                            "source": "deterministic_call_simulator",
+                            "attempt": task.attempt_count,
+                            "outcome": outcome,
+                        },
+                        documentation_status="simulated",
+                    )
+                )
                 event = Event(
                     hospital_id=hospital_id,
                     event_type=f"call.{outcome}",
@@ -657,6 +682,18 @@ class PostgresRepository:
                     processed_at=now,
                 )
                 session.add(event)
+                if task.state == OutreachState.MANUAL_FOLLOW_UP.value:
+                    session.add(
+                        Event(
+                            hospital_id=hospital_id,
+                            event_type="manual_follow_up.created",
+                            aggregate_id=task.id,
+                            payload={"reason": "maximum_retries"},
+                            idempotency_key=f"manual-follow-up:{task.id}",
+                            occurred_at=now,
+                            processed_at=now,
+                        )
+                    )
 
     async def create_triage_ehr_record(
         self,
@@ -667,14 +704,25 @@ class PostgresRepository:
         payload: dict,
     ) -> dict:
         now = datetime.now(UTC)
-        async with session_factory()() as session, session.begin():
-            record = EHRRecord(
+        write = mock_ehr.validate_write(
+            EHRWriteRequest(
                 hospital_id=hospital_id,
                 patient_id=patient_id,
                 resource_type="Observation",
                 status="preliminary",
                 source="structured-outreach-triage",
                 payload=payload,
+            ),
+            authorized_hospital_id=hospital_id,
+        )
+        async with session_factory()() as session, session.begin():
+            record = EHRRecord(
+                hospital_id=write.hospital_id,
+                patient_id=write.patient_id,
+                resource_type=write.resource_type,
+                status=write.status,
+                source=write.source,
+                payload=write.payload,
                 created_at=now,
                 synced_at=None,
             )
@@ -936,6 +984,17 @@ class PostgresRepository:
             if existing:
                 return existing.payload["result"]
             now = datetime.now(UTC)
+            ehr_write = mock_ehr.validate_write(
+                EHRWriteRequest(
+                    hospital_id=hospital_id,
+                    patient_id=patient_id,
+                    resource_type="Communication",
+                    status="final",
+                    source="documentation-agent",
+                    payload=result["documentation"],
+                ),
+                authorized_hospital_id=hospital_id,
+            )
             call = CallRecord(
                 hospital_id=hospital_id,
                 task_id=task.id,
@@ -961,12 +1020,12 @@ class PostgresRepository:
             task.lease_expires_at = None
 
             ehr = EHRRecord(
-                hospital_id=hospital_id,
-                patient_id=patient_id,
-                resource_type="Communication",
-                status="final",
-                source="documentation-agent",
-                payload=result["documentation"],
+                hospital_id=ehr_write.hospital_id,
+                patient_id=ehr_write.patient_id,
+                resource_type=ehr_write.resource_type,
+                status=ehr_write.status,
+                source=ehr_write.source,
+                payload=ehr_write.payload,
                 created_at=now,
                 synced_at=now,
             )
@@ -1087,6 +1146,57 @@ class PostgresRepository:
                         channel="dashboard",
                         recipient_role="clinical_reviewer",
                         subject="Post-discharge escalation requires review",
+                        status="delivered",
+                        idempotency_key=key,
+                        created_at=now,
+                        delivered_at=now,
+                    )
+                )
+                delivered += 1
+            manual_tasks = list(
+                (
+                    await session.scalars(
+                        select(OutreachTask).where(
+                            OutreachTask.state == OutreachState.MANUAL_FOLLOW_UP.value
+                        )
+                    )
+                ).all()
+            )
+            for task in manual_tasks:
+                key = f"manual-follow-up-notification:{task.id}:dashboard"
+                if await session.scalar(
+                    select(Notification.id).where(Notification.idempotency_key == key)
+                ):
+                    continue
+                now = datetime.now(UTC)
+                event = await session.scalar(
+                    select(Event)
+                    .where(
+                        Event.hospital_id == task.hospital_id,
+                        Event.aggregate_id == task.id,
+                        Event.event_type == "manual_follow_up.created",
+                    )
+                    .limit(1)
+                )
+                if event is None:
+                    event = Event(
+                        hospital_id=task.hospital_id,
+                        event_type="manual_follow_up.created",
+                        aggregate_id=task.id,
+                        payload={"reason": "maximum_retries_or_deadline"},
+                        idempotency_key=f"manual-follow-up:{task.id}",
+                        occurred_at=now,
+                        processed_at=now,
+                    )
+                    session.add(event)
+                    await session.flush()
+                session.add(
+                    Notification(
+                        hospital_id=task.hospital_id,
+                        event_id=event.id,
+                        channel="dashboard",
+                        recipient_role="campaign_manager",
+                        subject="Manual patient follow-up required",
                         status="delivered",
                         idempotency_key=key,
                         created_at=now,
