@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -11,6 +12,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from outreach.agents import ConversationRequest, run_conversation_workflow
 from outreach.config import get_settings
 from outreach.database import close_database, initialize_database
 from outreach.enums import CampaignStatus, EscalationStatus, Role
@@ -27,16 +29,21 @@ from outreach.security import (
 )
 from outreach.simulation import QueueSimulation
 from outreach.triage import TriageRequest, assess
+from outreach.worker import stop_worker, worker_loop
 from outreach.workflows import workflow_processor
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    worker_task = None
     if get_settings().persistence_enabled:
         await initialize_database()
         await postgres_repository.seed_synthetic_foundation(simulation)
         await postgres_repository.seed_missing_clinical_records()
+        if get_settings().background_workers_enabled:
+            worker_task = asyncio.create_task(worker_loop())
     yield
+    await stop_worker(worker_task)
     if get_settings().persistence_enabled:
         await close_database()
 
@@ -162,6 +169,9 @@ async def health() -> dict:
             "queue_simulator": "healthy",
             "workflow_processor": "degraded" if failed_events else "healthy",
             "database": ("healthy" if get_settings().persistence_enabled else "disabled"),
+            "background_worker": (
+                "healthy" if get_settings().background_workers_enabled else "manual"
+            ),
         },
     }
     if get_settings().persistence_enabled:
@@ -707,6 +717,50 @@ async def run_triage(
     return {"triage": result, "mock_ehr_record": ehr_record}
 
 
+@app.post("/api/v1/conversations/simulate")
+async def simulate_conversation(
+    request: ConversationRequest,
+    principal: Principal = Depends(
+        require_roles(
+            Role.HOSPITAL_ADMIN,
+            Role.CAMPAIGN_MANAGER,
+            Role.CLINICAL_REVIEWER,
+        )
+    ),
+) -> dict:
+    if principal.hospital_id is None:
+        raise HTTPException(status_code=422, detail="A hospital context is required")
+    patient = operations.patients.get(request.patient_id)
+    if get_settings().persistence_enabled:
+        patients = await postgres_repository.list_patients(principal.hospital_id)
+        patient = next((item for item in patients if item["id"] == request.patient_id), None)
+    if patient is None:
+        raise HTTPException(status_code=404, detail="Patient not found")
+    enforce_tenant(principal, uuid.UUID(patient["hospital_id"]))
+
+    result = run_conversation_workflow(request)
+    payload = result.model_dump(mode="json")
+    if get_settings().persistence_enabled:
+        try:
+            payload = await postgres_repository.save_conversation_workflow(
+                hospital_id=principal.hospital_id,
+                actor_id=principal.user_id,
+                patient_id=uuid.UUID(request.patient_id),
+                transcript=request.transcript,
+                idempotency_key=request.idempotency_key,
+                result=payload,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+    return {
+        "workflow": payload,
+        "safety_notice": (
+            "Synthetic demonstration only. The workflow does not diagnose, prescribe, "
+            "or change treatment."
+        ),
+    }
+
+
 @app.get("/api/v1/mock-ehr/records")
 async def list_ehr_records(
     principal: Principal = Depends(current_principal),
@@ -752,7 +806,12 @@ def process_workflows(
 
 
 @app.get("/api/v1/notifications")
-def list_notifications(principal: Principal = Depends(current_principal)) -> list[dict]:
+async def list_notifications(
+    principal: Principal = Depends(current_principal),
+) -> list[dict]:
+    if get_settings().persistence_enabled:
+        hospital_id = None if principal.role == Role.PLATFORM_ADMIN else principal.hospital_id
+        return await postgres_repository.list_notifications(hospital_id)
     return operations.tenant_rows(list(operations.notifications.values()), principal.hospital_id)
 
 

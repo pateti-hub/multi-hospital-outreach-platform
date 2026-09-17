@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -20,6 +21,7 @@ from outreach.models import (
     Event,
     Hospital,
     KnowledgeResource,
+    Notification,
     OutreachTask,
     Patient,
     Protocol,
@@ -896,6 +898,227 @@ class PostgresRepository:
                     "success": row.success,
                     "validation_status": row.validation_status,
                     "created_at": row.created_at.isoformat(),
+                }
+                for row in rows
+            ]
+
+    async def save_conversation_workflow(
+        self,
+        *,
+        hospital_id: uuid.UUID,
+        actor_id: uuid.UUID,
+        patient_id: uuid.UUID,
+        transcript: str,
+        idempotency_key: str,
+        result: dict,
+    ) -> dict:
+        key_digest = hashlib.sha256(idempotency_key.encode()).hexdigest()
+        event_key = f"conversation:{hospital_id}:{key_digest}"
+        async with session_factory()() as session, session.begin():
+            existing = await session.scalar(select(Event).where(Event.idempotency_key == event_key))
+            if existing:
+                return existing.payload["result"]
+            task = await session.scalar(
+                select(OutreachTask)
+                .where(
+                    OutreachTask.hospital_id == hospital_id,
+                    OutreachTask.patient_id == patient_id,
+                )
+                .order_by(OutreachTask.deadline.desc())
+                .limit(1)
+                .with_for_update()
+            )
+            if task is None:
+                raise ValueError("Patient has no outreach task")
+            # Recheck after the task lock so concurrent requests with the same
+            # key cannot both create external side effects.
+            existing = await session.scalar(select(Event).where(Event.idempotency_key == event_key))
+            if existing:
+                return existing.payload["result"]
+            now = datetime.now(UTC)
+            call = CallRecord(
+                hospital_id=hospital_id,
+                task_id=task.id,
+                outcome=result["intake"]["disposition"],
+                started_at=now,
+                ended_at=now,
+                transcript=transcript,
+                structured_result=result,
+                documentation_status=result["documentation"]["documentation_status"],
+            )
+            session.add(call)
+            await session.flush()
+
+            if result["triage"]["escalation_required"]:
+                task.state = OutreachState.ESCALATED.value
+            elif result["intake"]["callback_requested"]:
+                task.state = OutreachState.CALLBACK_SCHEDULED.value
+                task.callback_at = now + timedelta(hours=1)
+                task.available_at = task.callback_at
+            else:
+                task.state = OutreachState.COMPLETED.value
+            task.lease_owner = None
+            task.lease_expires_at = None
+
+            ehr = EHRRecord(
+                hospital_id=hospital_id,
+                patient_id=patient_id,
+                resource_type="Communication",
+                status="final",
+                source="documentation-agent",
+                payload=result["documentation"],
+                created_at=now,
+                synced_at=now,
+            )
+            session.add(ehr)
+
+            if result["triage"]["escalation_required"]:
+                session.add(
+                    Escalation(
+                        hospital_id=hospital_id,
+                        call_id=call.id,
+                        patient_id=patient_id,
+                        status="open",
+                        priority=(
+                            "urgent"
+                            if result["triage"]["final_classification"] == "urgent"
+                            else "high"
+                        ),
+                        trigger=result["triage"]["rationale"],
+                        evidence={
+                            "indicators": result["documentation"]["patient_reported_symptoms"],
+                            "protocol_reference": result["documentation"]["protocol_references"][0],
+                        },
+                        consensus={
+                            "assessments": result["triage"]["assessments"],
+                            "disagreement": result["triage"]["disagreement"],
+                        },
+                        assigned_user_id=None,
+                        resolution=None,
+                        resolved_at=None,
+                    )
+                )
+
+            for agent in [
+                "voice_intake",
+                "clinical_triage",
+                "escalation_consensus",
+                "documentation",
+            ]:
+                session.add(
+                    AIUsage(
+                        hospital_id=hospital_id,
+                        patient_id=patient_id,
+                        agent=agent,
+                        provider="deterministic",
+                        model="bounded-workflow-v1",
+                        prompt_version=f"{agent}-1.0",
+                        purpose="post_discharge_conversation",
+                        latency_ms=0,
+                        input_tokens=None,
+                        output_tokens=None,
+                        estimated_cost_usd="0",
+                        success=True,
+                        validation_status="valid",
+                        created_at=now,
+                    )
+                )
+            session.add(
+                Event(
+                    hospital_id=hospital_id,
+                    event_type="conversation.completed",
+                    aggregate_id=call.id,
+                    payload={"result": result},
+                    idempotency_key=event_key,
+                    occurred_at=now,
+                    processed_at=now,
+                )
+            )
+            session.add(
+                AuditLog(
+                    hospital_id=hospital_id,
+                    actor_id=actor_id,
+                    action="conversation.workflow_completed",
+                    resource_type="call_record",
+                    resource_id=call.id,
+                    occurred_at=now,
+                    details={
+                        "outcome": call.outcome,
+                        "escalation_required": result["triage"]["escalation_required"],
+                    },
+                )
+            )
+        return result
+
+    async def deliver_pending_escalation_notifications(self) -> int:
+        delivered = 0
+        async with session_factory()() as session, session.begin():
+            escalations = list(
+                (
+                    await session.scalars(
+                        select(Escalation).where(
+                            Escalation.status.in_(["open", "assigned", "in_review"])
+                        )
+                    )
+                ).all()
+            )
+            for escalation in escalations:
+                key = f"escalation-notification:{escalation.id}:dashboard"
+                if await session.scalar(
+                    select(Notification.id).where(Notification.idempotency_key == key)
+                ):
+                    continue
+                now = datetime.now(UTC)
+                event = Event(
+                    hospital_id=escalation.hospital_id,
+                    event_type="escalation.notification_requested",
+                    aggregate_id=escalation.id,
+                    payload={"priority": escalation.priority},
+                    idempotency_key=f"event:{key}",
+                    occurred_at=now,
+                    processed_at=now,
+                )
+                session.add(event)
+                await session.flush()
+                session.add(
+                    Notification(
+                        hospital_id=escalation.hospital_id,
+                        event_id=event.id,
+                        channel="dashboard",
+                        recipient_role="clinical_reviewer",
+                        subject="Post-discharge escalation requires review",
+                        status="delivered",
+                        idempotency_key=key,
+                        created_at=now,
+                        delivered_at=now,
+                    )
+                )
+                delivered += 1
+        return delivered
+
+    async def list_notifications(self, hospital_id: uuid.UUID | None) -> list[dict]:
+        async with session_factory()() as session:
+            statement = select(Notification)
+            if hospital_id:
+                statement = statement.where(Notification.hospital_id == hospital_id)
+            rows = list(
+                (
+                    await session.scalars(
+                        statement.order_by(Notification.created_at.desc()).limit(250)
+                    )
+                ).all()
+            )
+            return [
+                {
+                    "id": str(row.id),
+                    "hospital_id": str(row.hospital_id),
+                    "event_id": str(row.event_id),
+                    "channel": row.channel,
+                    "recipient_role": row.recipient_role,
+                    "subject": row.subject,
+                    "status": row.status,
+                    "created_at": row.created_at.isoformat(),
+                    "delivered_at": (row.delivered_at.isoformat() if row.delivered_at else None),
                 }
                 for row in rows
             ]

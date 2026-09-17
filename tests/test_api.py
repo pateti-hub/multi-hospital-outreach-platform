@@ -130,6 +130,30 @@ def test_patient_detail_contains_operational_timeline(monkeypatch) -> None:
     get_settings.cache_clear()
 
 
+def test_conversation_simulation_uses_tenant_patient(monkeypatch) -> None:
+    monkeypatch.setenv("DEMO_AUTH_ENABLED", "true")
+    get_settings.cache_clear()
+    client = TestClient(app)
+    headers = auth_headers(client, "mercy-general", "clinical_reviewer")
+    patient = client.get("/api/v1/patients", headers=headers).json()[0]
+    response = client.post(
+        "/api/v1/conversations/simulate",
+        headers=headers,
+        json={
+            "idempotency_key": "api-synthetic-conversation-001",
+            "patient_id": patient["id"],
+            "transcript": "I have severe chest pain and cannot breathe.",
+            "identity_verified": True,
+            "consent_to_continue": True,
+        },
+    )
+    assert response.status_code == 200
+    workflow = response.json()["workflow"]
+    assert workflow["triage"]["final_classification"] == "urgent"
+    assert workflow["documentation"]["documentation_status"] == "needs_human_review"
+    get_settings.cache_clear()
+
+
 def test_campaign_workload_estimate(monkeypatch) -> None:
     monkeypatch.setenv("DEMO_AUTH_ENABLED", "true")
     get_settings.cache_clear()
