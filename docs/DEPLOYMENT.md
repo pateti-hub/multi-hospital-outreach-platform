@@ -22,6 +22,7 @@ Optional Supabase authentication:
 SUPABASE_AUTH_ENABLED=true
 SUPABASE_URL=<project URL>
 SUPABASE_ANON_KEY=<public anonymous key>
+VOICE_SERVICE_URL=<Pipecat/Daily voice service URL>
 ```
 
 Do not commit these values. Supabase authorization reads only administrator-controlled
@@ -48,3 +49,19 @@ docker compose up --build
 ```
 
 Open `http://localhost:8000/` and API documentation at `http://localhost:8000/docs`.
+
+## Separate queue worker
+
+For independently scalable execution, deploy the same repository as a second Railway
+service using `Dockerfile.worker`. Give it the same `DATABASE_URL` and set:
+
+```text
+PERSISTENCE_ENABLED=true
+BACKGROUND_WORKERS_ENABLED=true
+AUTO_QUEUE_ENABLED=true
+WORKER_INTERVAL_SECONDS=30
+```
+
+On the API service set `BACKGROUND_WORKERS_ENABLED=false` and
+`AUTO_QUEUE_ENABLED=false`. PostgreSQL advisory locks, row leases, and idempotency
+still protect against duplicate execution when worker replicas overlap.

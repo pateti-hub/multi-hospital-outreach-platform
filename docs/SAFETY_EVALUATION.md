@@ -14,14 +14,14 @@ Metrics include true positives, false positives, true negatives, false negatives
 false-negative rate. The expected baseline has zero false negatives. This result only
 describes the small synthetic fixture and is **not evidence of clinical validity**.
 
-## Version 1.0 baseline
+## Version 1.1 baseline
 
 | Metric | Result |
 |---|---:|
-| Cases | 10 |
-| True positives | 8 |
+| Cases | 19 |
+| True positives | 15 |
 | False positives | 0 |
-| True negatives | 2 |
+| True negatives | 4 |
 | False negatives | 0 |
 | False-negative rate | 0.0 |
 

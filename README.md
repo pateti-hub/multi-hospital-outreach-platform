@@ -29,6 +29,8 @@ and mock EHR updates.
 - optional autonomous queue execution, stale-lease recovery and deadline handling
 - optional Supabase authentication and provider-neutral circuit breaking
 - validated replaceable mock-EHR adapter
+- separately deployable queue-worker runtime
+- Pipecat/Daily streaming WebRTC session gateway
 - architecture, queue, and security documentation
 - repeatable unit tests
 

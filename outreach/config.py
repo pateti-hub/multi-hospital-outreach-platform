@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     supabase_auth_enabled: bool = False
     supabase_url: str | None = None
     supabase_anon_key: str | None = None
+    voice_service_url: str | None = None
 
     @field_validator("database_url")
     @classmethod

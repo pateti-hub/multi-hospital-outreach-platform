@@ -29,6 +29,7 @@ from outreach.security import (
 )
 from outreach.simulation import QueueSimulation
 from outreach.triage import TriageRequest, assess
+from outreach.voice import VoiceGatewayError, voice_gateway
 from outreach.worker import run_worker_cycle, stop_worker, worker_loop
 from outreach.workflows import workflow_processor
 
@@ -89,6 +90,10 @@ class CampaignCreateRequest(BaseModel):
     clinical_window_hours: int = Field(ge=1, le=168)
     retry_limit: int = Field(default=3, ge=0, le=10)
     priority_weight: float = Field(default=1.0, ge=0.1, le=5)
+
+
+class VoiceSessionRequest(BaseModel):
+    task_id: uuid.UUID
 
 
 DEMO_HOSPITALS = {
@@ -177,9 +182,16 @@ async def health() -> dict:
             ),
             "authentication": (
                 "supabase_and_local"
+                if (
+                    get_settings().supabase_auth_enabled
+                    and get_settings().supabase_url
+                    and get_settings().supabase_anon_key
+                )
+                else "misconfigured"
                 if get_settings().supabase_auth_enabled
                 else "local_signed_tokens"
             ),
+            "streaming_voice": ("configured" if get_settings().voice_service_url else "simulator"),
         },
     }
     if get_settings().persistence_enabled:
@@ -767,6 +779,34 @@ async def simulate_conversation(
             "or change treatment."
         ),
     }
+
+
+@app.post("/api/v1/voice/sessions")
+async def create_voice_session(
+    request: VoiceSessionRequest,
+    principal: Principal = Depends(
+        require_roles(
+            Role.HOSPITAL_ADMIN,
+            Role.CAMPAIGN_MANAGER,
+            Role.CLINICAL_REVIEWER,
+        )
+    ),
+) -> dict:
+    settings = get_settings()
+    if principal.hospital_id is None:
+        raise HTTPException(status_code=422, detail="A hospital context is required")
+    if not settings.voice_service_url:
+        raise HTTPException(status_code=503, detail="Streaming voice is not configured")
+    snapshot = await postgres_repository.queue_snapshot(principal.hospital_id)
+    if not any(task["id"] == str(request.task_id) for task in snapshot["tasks"]):
+        raise HTTPException(status_code=404, detail="Outreach task not found")
+    try:
+        return await voice_gateway.create_session(
+            settings.voice_service_url,
+            task_id=str(request.task_id),
+        )
+    except VoiceGatewayError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
 
 
 @app.get("/api/v1/mock-ehr/records")
