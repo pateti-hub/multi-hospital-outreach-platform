@@ -23,6 +23,7 @@ and mock EHR updates.
 - reviewer assignment, review, resolution, and patient operational timelines
 - campaign workload estimates and a reproducible 240-patient synthetic feed generator
 - Railway deployment configuration and health checks
+- versioned hospital protocols, tenant-aware retrieval and AI usage tracing
 - architecture, queue, and security documentation
 - repeatable unit tests
 
@@ -57,3 +58,4 @@ Demo authentication is deliberately evaluation-only. Set
 - [Data model](docs/DATA_MODEL.md)
 - [Deployment](docs/DEPLOYMENT.md)
 - [Evaluator demo](docs/DEMO_GUIDE.md)
+- [Knowledge and retrieval](docs/KNOWLEDGE_AND_RETRIEVAL.md)

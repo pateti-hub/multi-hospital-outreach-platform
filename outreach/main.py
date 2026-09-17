@@ -7,7 +7,7 @@ from math import ceil
 from pathlib import Path
 from typing import Literal
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -35,6 +35,7 @@ async def lifespan(_: FastAPI):
     if get_settings().persistence_enabled:
         await initialize_database()
         await postgres_repository.seed_synthetic_foundation(simulation)
+        await postgres_repository.seed_missing_clinical_records()
     yield
     if get_settings().persistence_enabled:
         await close_database()
@@ -515,16 +516,60 @@ async def update_campaign_status(
 
 
 @app.get("/api/v1/escalations")
-def list_escalations(principal: Principal = Depends(current_principal)) -> list[dict]:
+async def list_escalations(
+    principal: Principal = Depends(current_principal),
+) -> list[dict]:
+    if get_settings().persistence_enabled:
+        if principal.hospital_id is None:
+            raise HTTPException(status_code=422, detail="A hospital context is required")
+        return await postgres_repository.list_escalations(principal.hospital_id)
     return operations.tenant_rows(list(operations.escalations.values()), principal.hospital_id)
 
 
 @app.patch("/api/v1/escalations/{escalation_id}")
-def update_escalation(
+async def update_escalation(
     escalation_id: str,
     request: EscalationUpdateRequest,
     principal: Principal = Depends(require_roles(Role.HOSPITAL_ADMIN, Role.CLINICAL_REVIEWER)),
 ) -> dict:
+    if get_settings().persistence_enabled:
+        if principal.hospital_id is None:
+            raise HTTPException(status_code=422, detail="A hospital context is required")
+        rows = await postgres_repository.list_escalations(principal.hospital_id)
+        escalation = next(
+            (item for item in rows if item["id"] == escalation_id),
+            None,
+        )
+        if escalation is None:
+            raise HTTPException(status_code=404, detail="Escalation not found")
+        current = EscalationStatus(escalation["status"])
+        if request.status not in ESCALATION_TRANSITIONS.get(current, set()):
+            raise HTTPException(
+                status_code=409,
+                detail="Escalation transition is not allowed",
+            )
+        assigned_to = request.assigned_to or escalation["assigned_to"]
+        if (
+            request.status in {EscalationStatus.ASSIGNED, EscalationStatus.IN_REVIEW}
+            and not assigned_to
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="A reviewer assignment is required",
+            )
+        if request.status == EscalationStatus.RESOLVED and not request.resolution:
+            raise HTTPException(status_code=422, detail="Resolution is required")
+        result = await postgres_repository.update_escalation(
+            escalation_id=uuid.UUID(escalation_id),
+            hospital_id=principal.hospital_id,
+            actor_id=principal.user_id,
+            status=request.status.value,
+            assigned_to=assigned_to,
+            resolution=request.resolution,
+        )
+        if result is None:
+            raise HTTPException(status_code=404, detail="Escalation not found")
+        return result
     escalation = operations.escalations.get(escalation_id)
     if escalation is None:
         raise HTTPException(status_code=404, detail="Escalation not found")
@@ -563,6 +608,47 @@ def update_escalation(
         },
     )
     return escalation
+
+
+@app.get("/api/v1/protocols")
+async def list_protocols(
+    principal: Principal = Depends(current_principal),
+) -> list[dict]:
+    if principal.hospital_id is None:
+        raise HTTPException(status_code=422, detail="A hospital context is required")
+    if not get_settings().persistence_enabled:
+        return []
+    return await postgres_repository.list_protocols(principal.hospital_id)
+
+
+@app.get("/api/v1/knowledge/search")
+async def search_knowledge(
+    q: str = Query(min_length=2, max_length=200),
+    principal: Principal = Depends(current_principal),
+) -> dict:
+    if principal.hospital_id is None:
+        raise HTTPException(status_code=422, detail="A hospital context is required")
+    if not get_settings().persistence_enabled:
+        return {"query": q, "sources": []}
+    sources = await postgres_repository.search_knowledge(principal.hospital_id, q)
+    return {
+        "query": q,
+        "tenant_id": str(principal.hospital_id),
+        "sources": sources,
+        "grounding_policy": (
+            "Only active resources belonging to the authenticated hospital are returned."
+        ),
+    }
+
+
+@app.get("/api/v1/ai-usage")
+async def list_ai_usage(
+    principal: Principal = Depends(require_roles(Role.PLATFORM_ADMIN, Role.HOSPITAL_ADMIN)),
+) -> list[dict]:
+    if not get_settings().persistence_enabled:
+        return []
+    hospital_id = None if principal.role == Role.PLATFORM_ADMIN else principal.hospital_id
+    return await postgres_repository.list_ai_usage(hospital_id)
 
 
 @app.post("/api/v1/triage")

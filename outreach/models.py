@@ -93,6 +93,18 @@ class Protocol(Base, IdMixin, TenantMixin):
     active: Mapped[bool] = mapped_column(default=True, nullable=False)
 
 
+class KnowledgeResource(Base, IdMixin, TenantMixin):
+    __tablename__ = "knowledge_resources"
+
+    title: Mapped[str] = mapped_column(String(240), nullable=False)
+    resource_type: Mapped[str] = mapped_column(String(60), index=True)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    source_reference: Mapped[str] = mapped_column(String(180), nullable=False)
+    version: Mapped[str] = mapped_column(String(40), nullable=False)
+    active: Mapped[bool] = mapped_column(default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
 class Campaign(Base, IdMixin, TenantMixin):
     __tablename__ = "campaigns"
 
@@ -193,6 +205,24 @@ class Notification(Base, IdMixin, TenantMixin):
     idempotency_key: Mapped[str] = mapped_column(String(160), unique=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AIUsage(Base, IdMixin, TenantMixin):
+    __tablename__ = "ai_usage"
+
+    patient_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("patients.id"))
+    agent: Mapped[str] = mapped_column(String(80), index=True)
+    provider: Mapped[str] = mapped_column(String(80))
+    model: Mapped[str] = mapped_column(String(120))
+    prompt_version: Mapped[str] = mapped_column(String(40))
+    purpose: Mapped[str] = mapped_column(String(160))
+    latency_ms: Mapped[int] = mapped_column(Integer)
+    input_tokens: Mapped[int | None] = mapped_column(Integer)
+    output_tokens: Mapped[int | None] = mapped_column(Integer)
+    estimated_cost_usd: Mapped[str | None] = mapped_column(String(40))
+    success: Mapped[bool] = mapped_column(nullable=False)
+    validation_status: Mapped[str] = mapped_column(String(40))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
 class AuditLog(Base, IdMixin, TenantMixin):
