@@ -42,8 +42,8 @@ class PipecatVoiceGateway:
                 result = response.json()
         except (httpx.HTTPError, ValueError) as error:
             raise VoiceGatewayError("Voice provider is unavailable") from error
-        room_url = result.get("room_url") or result.get("roomUrl")
-        token = result.get("token")
+        room_url = result.get("room_url") or result.get("roomUrl") or result.get("dailyRoom")
+        token = result.get("token") or result.get("dailyToken")
         if not room_url or not token:
             raise VoiceGatewayError("Voice provider returned an invalid session")
         return {

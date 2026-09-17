@@ -60,3 +60,23 @@ async def test_voice_gateway_rejects_invalid_provider_response(monkeypatch) -> N
             "https://voice.example.test",
             task_id="synthetic-task",
         )
+
+
+async def test_voice_gateway_accepts_pipecat_runner_field_names(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "outreach.voice.httpx.AsyncClient",
+        lambda **kwargs: Client(
+            {
+                "dailyRoom": "https://synthetic.daily.co/outreach",
+                "dailyToken": "synthetic-token",
+                "sessionId": "synthetic-session",
+            }
+        ),
+    )
+
+    result = await PipecatVoiceGateway().create_session(
+        "https://voice.example.test",
+        task_id="synthetic-task",
+    )
+
+    assert result["room_url"] == "https://synthetic.daily.co/outreach"
